@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
@@ -16,14 +17,12 @@ from api.client import (
     DEFAULT_SRC_CHANNEL,
 )
 from api.sign import md5_hex
+from cron import CronExpr, next_run, parse_cron
 from notify import DEFAULT_TEMPLATE, NOTIFY_GROUPINGS, NOTIFY_MODES, NotifySettings
 
 INDEXED_PHONE_RE = re.compile(r"^PHONE_(\d+)$")
 INDEXED_PASSWORD_RE = re.compile(r"^PASSWORD_(\d+)$")
 INLINE_COMMENT_RE = re.compile(r"\s+#")
-# 定时运行的间隔：24h / 30m / 90s / 2d，不带单位按秒算
-DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd]?)$")
-DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 ENV_FILE_NAME = ".env"
 
 # 找到这些标记就认为到项目根了，不再往上找 .env
@@ -146,8 +145,8 @@ class Config:
     retries: int = DEFAULT_RETRIES
     show_token: bool = False
     notify: NotifySettings = field(default_factory=NotifySettings)
-    # 本地定时运行的间隔（秒）；0 表示跑一次就退出。云函数/Actions 不看这个
-    run_interval: float = 0.0
+    # 本地定时运行的 cron 表达式；None 表示跑一次就退出。云函数/Actions 不看这个
+    run_cron: CronExpr | None = None
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -231,29 +230,26 @@ def _resolve_password_md5(source: Mapping[str, str], suffix: str) -> str:
     return md5_hex(str(plain)) if plain else ""
 
 
-def parse_duration(raw: str) -> float:
-    """把 ``24h`` / ``30m`` / ``90s`` / ``2d`` 解析成秒数。
-
-    不带单位时按秒算。``0`` 表示停用（只运行一次）。
-    """
-    text = str(raw or "").strip().lower()
-    if not text:
-        return 0.0
-
-    match = DURATION_RE.match(text)
-    if not match:
-        raise ConfigError(
-            f"RUN_INTERVAL 格式不对：{raw!r}，应形如 30m / 24h / 90s / 2d"
-        )
-    return float(match.group(1)) * DURATION_UNITS[match.group(2)]
+def parse_run_cron(source: Mapping[str, str]) -> CronExpr | None:
+    """读 ``RUN_CRON``；没配返回 None（只运行一次）。"""
+    raw = _get(source, "RUN_CRON")
+    if not raw:
+        return None
+    try:
+        expression = parse_cron(raw)
+        # 提前算一次，好把「永远匹配不到」的表达式（如 0 0 30 2 *）在启动时就拦下
+        next_run(expression, datetime.now())
+    except ValueError as exc:
+        raise ConfigError(f"RUN_CRON 无法解析：{exc}") from exc
+    return expression
 
 
-def load_run_interval(
+def load_run_cron(
     env_file: str | PathLike[str] | None = None,
     environ: Mapping[str, str] | None = None,
-) -> float:
-    """只读本地定时运行的间隔（秒）；0 表示跑一次就退出。"""
-    return parse_duration(_get(_resolve_source(env_file, environ), "RUN_INTERVAL"))
+) -> CronExpr | None:
+    """只读本地定时运行的 cron 表达式；None 表示跑一次就退出。"""
+    return parse_run_cron(_resolve_source(env_file, environ))
 
 
 def _resolve_retries(source: Mapping[str, str]) -> int:
@@ -404,5 +400,5 @@ def load_config(
         retries=_resolve_retries(source),
         show_token=_flag(source, "SHOW_TOKEN"),
         notify=_notify_settings(source),
-        run_interval=parse_duration(_get(source, "RUN_INTERVAL")),
+        run_cron=parse_run_cron(source),
     )

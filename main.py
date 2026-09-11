@@ -4,7 +4,8 @@
 拿到的令牌缓存到 ``.token_cache.json``，下次直接复用，不用每次登录。
 GitHub Actions 请加 ``--no-cache``：runner 每次都是全新环境，存了也带不到下一次。
 
-默认只运行一次就退出。想让它常驻，在 ``.env`` 里设 ``RUN_INTERVAL``（如 ``24h``）。
+默认只运行一次就退出。想让它常驻、到点才跑，在 ``.env`` 里设 ``RUN_CRON``，例如
+``RUN_CRON=0 1 * * *`` 就是每天凌晨 1 点跑一次。
 """
 
 from __future__ import annotations
@@ -12,11 +13,16 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from config import ConfigError, load_run_interval
+from config import ConfigError, load_run_cron
+from cron import CronExpr, next_run
 from runner import pause_all
 from token_cache import TokenCache
+
+# 长睡眠切成小段：这样系统时钟被改、机器休眠唤醒后，实际触发时刻仍跟着墙钟走，
+# 按 Ctrl+C 也能及时响应
+SLEEP_CHUNK = 60.0
 
 
 def force_utf8_output() -> None:
@@ -53,10 +59,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def format_duration(seconds: float) -> str:
     """把秒数说得像人话：86400 -> ``1 天``。"""
+    seconds = max(0, int(seconds))
     for unit, size in (("天", 86400), ("小时", 3600), ("分钟", 60)):
-        if seconds >= size and seconds % size == 0:
-            return f"{int(seconds // size)} {unit}"
-    return f"{seconds:g} 秒"
+        if seconds >= size:
+            rest = seconds % size
+            body = f"{seconds // size} {unit}"
+            if rest >= 60:
+                return f"{body} {rest // 60} 分钟"
+            return body
+    return f"{seconds} 秒"
 
 
 def run_once(cache: TokenCache | None) -> int:
@@ -68,31 +79,44 @@ def run_once(cache: TokenCache | None) -> int:
     return result.exit_code
 
 
-def run_forever(interval: float, cache: TokenCache | None) -> int:
-    """常驻运行：跑一轮、睡一会儿、再跑一轮，直到 Ctrl+C。
+def sleep_until(target: datetime, chunk: float = SLEEP_CHUNK) -> None:
+    """睡到 ``target``；中途被 Ctrl+C 打断会抛 ``KeyboardInterrupt``。"""
+    while True:
+        remaining = (target - datetime.now()).total_seconds()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, chunk))
+
+
+def run_forever(cron: CronExpr, cache: TokenCache | None) -> int:
+    """常驻运行：等到 cron 指定的时刻跑一轮，然后接着等下一次，直到 Ctrl+C。
 
     每行日志都带时间戳——这个进程会跑很久，翻日志时没有时间戳很难定位。
     """
-    print(f"⏰定时模式：每 {format_duration(interval)} 运行一次，按 Ctrl+C 退出")
 
     def stamped(line: str) -> None:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {line}")
 
+    print(f"⏰定时模式已开启（{cron.raw}），按 Ctrl+C 退出")
+
     while True:
+        target = next_run(cron, datetime.now())
+        stamped(
+            f"😴下次运行：{target:%Y-%m-%d %H:%M:%S}"
+            f"（{format_duration((target - datetime.now()).total_seconds())}后）"
+        )
+
+        try:
+            sleep_until(target)
+        except KeyboardInterrupt:
+            print("\n👋已停止定时运行")
+            return 0
+
         stamped("⌛️开始运行")
         try:
             pause_all(stamped, cache=cache)
         except Exception as exc:  # noqa: BLE001 - 常驻进程不该被一次意外弄死
             stamped(f"❌本次运行异常: {exc}")
-
-        nxt = datetime.now() + timedelta(seconds=interval)
-        stamped(f"😴下次运行：{nxt:%Y-%m-%d %H:%M:%S}")
-
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            print("\n👋已停止定时运行")
-            return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -102,14 +126,14 @@ def main(argv: list[str] | None = None) -> int:
     cache = None if args.no_cache else TokenCache()
 
     try:
-        interval = load_run_interval()
+        cron = load_run_cron()
     except ConfigError:
-        # 间隔配置读不出来时按「只跑一次」处理，让 pause_all 去统一报错并推送
-        interval = 0.0
+        # 定时配置读不出来时按「只跑一次」处理，让 pause_all 去统一报错并推送
+        cron = None
 
-    if interval <= 0:
+    if cron is None:
         return run_once(cache)
-    return run_forever(interval, cache)
+    return run_forever(cron, cache)
 
 
 if __name__ == "__main__":

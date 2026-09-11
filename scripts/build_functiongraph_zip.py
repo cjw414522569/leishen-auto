@@ -5,6 +5,8 @@
     index.py
     runner.py
     token_cache.py
+    notify.py
+    cron.py
     api/
     config/
 
@@ -26,7 +28,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-INCLUDE_FILES = ("index.py", "runner.py", "token_cache.py", "notify.py")
+INCLUDE_FILES = ("index.py", "runner.py", "token_cache.py", "notify.py", "cron.py")
 INCLUDE_DIRS = ("api", "config")
 SKIP_DIRS = {"__pycache__", ".pytest_cache"}
 
