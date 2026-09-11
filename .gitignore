@@ -16,3 +16,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Cloudflare Worker 的依赖与构建产物
+node_modules/
+.wrangler/

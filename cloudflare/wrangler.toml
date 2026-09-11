@@ -1,0 +1,38 @@
+name = "leishen-auto"
+main = "src/index.js"
+compatibility_date = "2026-09-11"
+
+[triggers]
+# ⚠️ Cron Triggers 按 **UTC** 执行（官方文档原文：Cron Triggers execute on UTC time）。
+# 北京时间凌晨 1 点 = UTC 17:00，所以要写成 0 17 * * *。
+# 想换成别的时刻，先换算成 UTC 再填，别直接照抄本地时间。
+crons = ["0 17 * * *"]
+
+[observability]
+enabled = true
+
+# ============ 配置放哪 ============
+# 账户和密码是凭据，用 secret 存，**不要**写进这个文件：
+#
+#   npx wrangler secret put PHONE_1
+#   npx wrangler secret put PASSWORD_1
+#   npx wrangler secret put PUSHPLUS_TOKEN        # 可选
+#
+# 非敏感项可以放下面（取消注释即可）：
+#
+# [vars]
+# NOTIFY_MODE = "on_change"
+# NOTIFY_GROUPING = "per_account"
+# RETRIES = "10"
+
+# ============ 可选：令牌缓存 ============
+# 绑了 KV 就能复用登录令牌，省掉每次运行都要登录（登录接口偶发「网络异常」）。
+# 不绑也能跑，只是每次都登录。
+#
+#   npx wrangler kv namespace create TOKEN_CACHE
+#
+# 然后把命令返回的 id 填进来：
+#
+# [[kv_namespaces]]
+# binding = "TOKEN_CACHE"
+# id = "把上一条命令返回的 id 填在这里"

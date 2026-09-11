@@ -1,0 +1,14 @@
+{
+  "name": "leishen-auto-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test ../../tests/js/"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

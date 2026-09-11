@@ -38,27 +38,39 @@ leishen-auto/
 ├── scripts/
 │   ├── build_functiongraph_zip.py    # 打包 FunctionGraph 部署包
 │   └── env_to_console_json.py        # 把 .env 转成控制台可粘贴的环境变量 JSON
-└── .github/workflows/auto-pause.yml # GitHub Actions 定时任务
+├── cloudflare/                 # Cloudflare Worker（JavaScript 重写的那份）
+│   ├── src/
+│   │   ├── index.js            # Worker 入口（Cron Triggers）
+│   │   ├── api.js              # 登录、暂停、重试
+│   │   ├── sign.js             # 接口签名（与 Python 版同一套黄金向量）
+│   │   ├── md5.js              # 自带 MD5（Web Crypto 不支持 MD5）
+│   │   ├── config.js           # 从 env 读配置
+│   │   ├── notify.js           # PushPlus 推送
+│   │   └── cache.js            # 令牌缓存（KV，可选）
+│   ├── wrangler.toml
+│   └── package.json
+├── Dockerfile / docker-compose.yml   # Docker 常驻定时
+└── .github/workflows/auto-pause.yml  # GitHub Actions 定时任务
 ```
 
 > 单元测试只保留在本地，没有随仓库推送。
 
 ---
 
-## 🧭 四种运行方式
+## 🧭 五种运行方式
 
-核心逻辑（`runner.py` + `api/` + `config/`）所有入口共用，区别只在**配置从哪来**、
+核心逻辑所有入口共用（Cloudflare 那份是 JS 重写，见下），区别只在**配置从哪来**、
 **要不要缓存令牌**、**由谁触发**：
 
-| | 本地命令行 | Docker | 华为云 FunctionGraph | GitHub Actions |
-|---|---|---|---|---|
-| 入口 | `main.py` | `main.py`（容器里常驻） | `index.py`（`index.handler`） | `main.py --no-cache` |
-| 配置来源 | `.env` / 环境变量 | `.env`（compose 注入） | 控制台环境变量 | 仓库 Secrets |
-| 令牌缓存 | ✅ 存本地 | ✅ 存卷里 | ❌ 无持久盘 | ❌ runner 每次全新 |
-| 触发方式 | 手动 / 系统计划任务 / `RUN_CRON` | `RUN_CRON` | 定时触发器 | cron |
+| | 本地命令行 | Docker | 华为云 FunctionGraph | GitHub Actions | Cloudflare Workers |
+|---|---|---|---|---|---|
+| 语言 | Python | Python | Python | Python | **JavaScript** |
+| 配置来源 | `.env` / 环境变量 | `.env`（compose 注入） | 控制台环境变量 | 仓库 Secrets | `wrangler secret` + `[vars]` |
+| 令牌缓存 | ✅ 存本地 | ✅ 存卷里 | ❌ | ❌ | ✅ KV（可选） |
+| 触发方式 | 手动 / `RUN_CRON` | `RUN_CRON` | 定时触发器 | cron | Cron Triggers |
 
-**本地与 Docker 会缓存令牌**——云函数和 Actions 的存储都是一次性的，存了也带不到
-下一次。下面分别说明。
+**本地、Docker、Cloudflare 会缓存令牌**——云函数和 Actions 的存储都是一次性的，
+存了也带不到下一次。下面分别说明。
 
 ---
 
@@ -594,6 +606,78 @@ docker compose build --build-arg APT_MIRROR=deb.debian.org
   `chown`
 - `logging` 里给日志加了 10MB × 3 的上限，常驻进程不会把磁盘写满
 - 想一次性跑完就退出（不进定时模式），把 `RUN_CRON` 那行删掉即可
+
+---
+
+## ☁️ 方式五：Cloudflare Workers
+
+跑在 Cloudflare 的免费额度上，由 **Cron Triggers** 定时触发。
+
+> **这一份是用 JavaScript 重写的**，不复用 Python 代码。原因有两个：
+> Workers 是 V8 运行时（Python 支持仍是 beta，且**不支持 stdlib 的
+> `urllib.request` / `http.client`**，得换成 `requests` 或 JS 的 `fetch`）；
+> 而 Workers 原生语言下 cron、KV 都是一等公民。签名算法用**同一套黄金向量**
+> 做过差分验证，两边结果逐字节一致。
+
+### 1. 安装并登录
+
+```bash
+cd cloudflare
+npm install
+npx wrangler login
+```
+
+### 2. 配置账户（用 secret，别写进文件）
+
+```bash
+npx wrangler secret put PHONE_1
+npx wrangler secret put PASSWORD_1
+# 多个账户继续加 PHONE_2 / PASSWORD_2 …
+# 推送（可选）
+npx wrangler secret put PUSHPLUS_TOKEN
+```
+
+非敏感项写在 `cloudflare/wrangler.toml` 的 `[vars]` 里，比如 `NOTIFY_MODE`。
+
+### 3. ⚠️ 改运行时间前先换算成 UTC
+
+**Cron Triggers 按 UTC 执行**（官方文档原文：Cron Triggers execute on UTC time）。
+`wrangler.toml` 里的默认值是：
+
+```toml
+[triggers]
+crons = ["0 17 * * *"]
+```
+
+`0 17 * * *` = UTC 17:00 = **北京时间次日凌晨 1 点**。想换成别的时刻，先换算再填，
+别直接照抄本地时间——照抄会把时间跑偏 8 小时，而且不会有任何报错。
+
+### 4. 部署
+
+```bash
+npx wrangler deploy
+```
+
+部署后可以直接用浏览器访问 Worker 的地址**手动触发一次**，会返回逐账户的结果：
+
+```json
+{"ok": true, "step": "done", "code": 0, "message": "",
+ "accounts": [{"label": "账户1 138****8000", "ok": true, "step": "pause", "code": 0}],
+ "logs": ["🔑[账户1 138****8000] 登录获取令牌中…", "..."]}
+```
+
+### 5. 令牌缓存（可选，省掉每次都登录）
+
+Worker 没有持久文件系统，缓存走 KV：
+
+```bash
+npx wrangler kv namespace create TOKEN_CACHE
+```
+
+把返回的 id 填进 `wrangler.toml` 的 `[[kv_namespaces]]`（文件里有注释示例）。
+**不绑也能跑**，只是每次运行都重新登录。
+
+> KV 里存的是等同凭据的东西，别把命名空间设成公开可读。
 
 ---
 
