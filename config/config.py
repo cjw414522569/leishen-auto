@@ -122,6 +122,7 @@ class Account:
     phone: str
     password_md5: str
     index: int = 0  # 0 表示不带编号的单账户写法
+    pushplus_token: str = ""  # 该账户专属的推送 token；空表示用全局那个
 
     @property
     def label(self) -> str:
@@ -281,7 +282,9 @@ def load_notify_settings(
     return _notify_settings(_resolve_source(env_file, environ))
 
 
-def collect_accounts(source: Mapping[str, str]) -> list[Account]:
+def collect_accounts(
+    source: Mapping[str, str], default_pushplus_token: str = ""
+) -> list[Account]:
     """收集账户。
 
     两种写法可以混用：
@@ -299,7 +302,8 @@ def collect_accounts(source: Mapping[str, str]) -> list[Account]:
         password_md5 = _resolve_password_md5(source, "")
         if not password_md5:
             raise ConfigError(_INCOMPLETE_HINT.format(group="PHONE 与 PASSWORD"))
-        accounts.append(Account(phone, password_md5, 0))
+        token = _get(source, "PUSHPLUS_TOKEN") or default_pushplus_token
+        accounts.append(Account(phone, password_md5, 0, token))
 
     indexes = sorted(
         int(match.group(1))
@@ -332,7 +336,8 @@ def collect_accounts(source: Mapping[str, str]) -> list[Account]:
         if not phone or not password_md5:
             hint = _INCOMPLETE_HINT.format(group=f"PHONE{suffix} 与 PASSWORD{suffix}")
             raise ConfigError(f"账户 {index} 配置不完整：{hint}")
-        accounts.append(Account(phone, password_md5, index))
+        token = _get(source, f"PUSHPLUS_TOKEN{suffix}") or default_pushplus_token
+        accounts.append(Account(phone, password_md5, index, token))
 
     return accounts
 
@@ -353,7 +358,7 @@ def load_config(
     """
     source = _resolve_source(env_file, environ)
 
-    accounts = collect_accounts(source)
+    accounts = collect_accounts(source, default_pushplus_token=_get(source, "PUSHPLUS_TOKEN"))
     if not accounts:
         raise ConfigError(
             "没有配置任何账户：需要配置 PHONE + PASSWORD，"

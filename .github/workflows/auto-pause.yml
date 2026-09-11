@@ -30,8 +30,11 @@ jobs:
           # 单账户写法（不带编号）也可以，把上面两组换成这两行即可：
           # PHONE: ${{ secrets.PHONE }}
           # PASSWORD: ${{ secrets.PASSWORD }}
-          # PushPlus 推送（可选）。没配这个 Secret 时为空字符串，等于不推送。
+          # PushPlus 推送（可选）。没配这些 Secret 时为空字符串，等于不推送。
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          # 想让每个账户推给自己的 token，把对应的 Secret 配上并取消注释：
+          # PUSHPLUS_TOKEN_1: ${{ secrets.PUSHPLUS_TOKEN_1 }}
+          # PUSHPLUS_TOKEN_2: ${{ secrets.PUSHPLUS_TOKEN_2 }}
           # 想只在真暂停时才收到通知，把下面这行取消注释：
           # NOTIFY_MODE: on_change
         # --no-cache：runner 每次都是全新环境，令牌缓存存了也带不到下一次

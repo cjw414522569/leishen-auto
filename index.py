@@ -59,7 +59,7 @@ def config_keys(max_accounts: int = MAX_ACCOUNTS) -> tuple[str, ...]:
     """所有需要从函数配置里读取的键。"""
     keys = list(BASE_KEYS)
     for index in range(1, max_accounts + 1):
-        keys += [f"PHONE_{index}", f"PASSWORD_{index}"]
+        keys += [f"PHONE_{index}", f"PASSWORD_{index}", f"PUSHPLUS_TOKEN_{index}"]
     return (*keys, *COMMON_KEYS)
 
 

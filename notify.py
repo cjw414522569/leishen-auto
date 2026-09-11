@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -47,6 +47,34 @@ class NotifySettings:
     @property
     def enabled(self) -> bool:
         return bool(self.token)
+
+
+@dataclass
+class Message:
+    """一条待发送的推送。``token`` 是投递目标。"""
+
+    token: str
+    title: str
+    content: str
+
+
+@dataclass
+class _Group:
+    """按投递目标切出来的一组账户，用来复用统一的判断与排版。"""
+
+    ok: bool
+    step: str = "done"
+    code: int = 0
+    message: str = ""
+    accounts: list[Any] = field(default_factory=list)
+
+
+def _group_of(result: Any, accounts: list[Any]) -> _Group:
+    failed = [account for account in accounts if not account.ok]
+    if not failed:
+        return _Group(True, result.step, 0, "", list(accounts))
+    first = failed[0]
+    return _Group(False, first.step, first.code, first.message, list(accounts))
 
 
 class PushPlusNotifier:
@@ -105,7 +133,7 @@ class PushPlusNotifier:
 
 
 def should_notify(settings: NotifySettings, result: Any) -> bool:
-    """整轮运行该不该推送（``combined`` 模式的判断）。
+    """一组账户该不该推送——只看时机，不看 token 配没配。
 
     **失败一定推送**（这是最需要知道的情况）；成功时按模式决定：
 
@@ -113,8 +141,6 @@ def should_notify(settings: NotifySettings, result: Any) -> bool:
     - ``on_change``：只有真的有账户从「运行中」变成「已暂停」才推
       （接口返回 400803「已经停止加速」说明状态没变，那种不算）
     """
-    if not settings.enabled:
-        return False
     if not result.ok:
         return True
     if settings.mode == NOTIFY_ON_CHANGE:
@@ -195,24 +221,49 @@ def account_content(account: Any, now: datetime | None = None) -> str:
 
 
 def build_messages(
-    settings: NotifySettings, result: Any, now: datetime | None = None
-) -> list[tuple[str, str]]:
-    """按配置算出这次要发哪几条推送，返回 ``[(标题, 正文), ...]``。
+    settings: NotifySettings,
+    result: Any,
+    tokens: list[str] | None = None,
+    now: datetime | None = None,
+) -> list[Message]:
+    """算出这次要发哪几条推送。
 
-    空列表表示不发。``per_account`` 是「一个账户一条」，``combined`` 是
-    「所有账户合成一条」；账户配置阶段就失败（没有逐账户信息）时，
-    两种组合都退化成一条汇总。
+    账户按**投递目标**归组：所有账户共用一个 token 时就是一条汇总；每个账户
+    各自有 token 时就是每个账户一条；混合时同一个 token 的合并成一条。
+
+    ``tokens`` 与 ``result.accounts`` 一一对应（账户自己的 token，空表示回落到
+    全局的 ``settings.token``）。``NOTIFY_GROUPING=per_account`` 会强制一个
+    账户一条，即使它们共用 token。
     """
-    if not settings.enabled:
+    accounts = list(result.accounts)
+    token_list = list(tokens or [])
+
+    def token_for(index: int) -> str:
+        own = token_list[index] if index < len(token_list) else ""
+        return own or settings.token
+
+    if not accounts:
+        # 配置阶段就失败，没有逐账户信息，只能发一条汇总
+        if settings.token and should_notify(settings, result):
+            return [Message(settings.token, format_title(result), format_content(result, now))]
         return []
 
-    if settings.grouping == GROUP_PER_ACCOUNT and result.accounts:
+    if settings.grouping == GROUP_PER_ACCOUNT:
         return [
-            (account_title(account), account_content(account, now))
-            for account in result.accounts
-            if should_notify_account(settings, account)
+            Message(token_for(index), account_title(account), account_content(account, now))
+            for index, account in enumerate(accounts)
+            if token_for(index) and should_notify_account(settings, account)
         ]
 
-    if should_notify(settings, result):
-        return [(format_title(result), format_content(result, now))]
-    return []
+    grouped: dict[str, list[Any]] = {}
+    for index, account in enumerate(accounts):
+        token = token_for(index)
+        if token:
+            grouped.setdefault(token, []).append(account)
+
+    messages = []
+    for token, group_accounts in grouped.items():
+        group = _group_of(result, group_accounts)
+        if should_notify(settings, group):
+            messages.append(Message(token, format_title(group), format_content(group, now)))
+    return messages

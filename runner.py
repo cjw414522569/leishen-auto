@@ -149,17 +149,32 @@ def _pause_account(
     return AccountResult(account.label, True, "pause", resp.code, resp.msg)
 
 
-def _notify(settings: NotifySettings, result: Result, log: Logger) -> None:
+def _notify(
+    settings: NotifySettings,
+    result: Result,
+    log: Logger,
+    tokens: list[str] | None = None,
+) -> None:
     """推送运行结果。
+
+    ``tokens`` 与 ``result.accounts`` 一一对应，让每个账户能推到自己专属的 token；
+    留空则统一用 ``settings.token``。
 
     推送失败只记一行日志——通知发不出去不该改变本次运行的结果。
     """
-    messages = build_messages(settings, result)
+    messages = build_messages(settings, result, tokens)
     if not messages:
         return
 
-    notifier = PushPlusNotifier(settings.token, settings.topic, settings.template)
-    accepted = sum(1 for title, content in messages if notifier.send(title, content))
+    notifiers: dict[str, PushPlusNotifier] = {}
+    accepted = 0
+    for message in messages:
+        if message.token not in notifiers:
+            notifiers[message.token] = PushPlusNotifier(
+                message.token, settings.topic, settings.template
+            )
+        if notifiers[message.token].send(message.title, message.content):
+            accepted += 1
 
     if accepted == len(messages):
         # PushPlus 是异步接口，这里只代表服务端受理了
@@ -225,5 +240,5 @@ def pause_all(
             False, first_failure.step, first_failure.code, first_failure.message, results
         )
 
-    _notify(cfg.notify, result, log)
+    _notify(cfg.notify, result, log, [account.pushplus_token for account in cfg.accounts])
     return result

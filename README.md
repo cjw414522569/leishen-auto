@@ -76,7 +76,8 @@ leishen-auto/
 | `API_LANG` | `zh_CN` | 接口语言 |
 | `RETRIES` | `10` | 单个请求的失败重试次数 |
 | `SHOW_TOKEN` | — | 设为 `1` 时打印登录得到的 `account_token`（调试用） |
-| `PUSHPLUS_TOKEN` | — | PushPlus 的 token；**留空则不推送** |
+| `PUSHPLUS_TOKEN` | — | 全局 PushPlus token；留空则不推送 |
+| `PUSHPLUS_TOKEN_1`、`_2`… | — | **账户专属**的推送 token，不填回落到全局那个 |
 | `PUSHPLUS_TOPIC` | — | 群组编码，填了推给整个群组，留空只推给自己 |
 | `PUSHPLUS_TEMPLATE` | `txt` | 消息模板（`txt` / `html` / `markdown` / `json`） |
 | `NOTIFY_MODE` | `always` | 推送时机，见下文 |
@@ -123,16 +124,39 @@ PASSWORD_2=另一个密码
 真的执行了，`400803`（账号已经停止加速）表示状态没变。所以 `on_change` 模式下，
 如果所有账户本来就已暂停，你不会收到任何打扰。
 
-**推送条数**由 `NOTIFY_GROUPING` 决定：
+### 每个账户推给不同的人
+
+账户可以配自己的 token，实现「谁的账号出结果就通知谁」：
+
+```bash
+PHONE_1=13800138000
+PASSWORD_1=...
+PUSHPLUS_TOKEN_1=账户1的token
+
+PHONE_2=13900139000
+PASSWORD_2=...
+PUSHPLUS_TOKEN_2=账户2的token
+```
+
+没配 `PUSHPLUS_TOKEN_n` 的账户自动回落到全局的 `PUSHPLUS_TOKEN`。**两者都没有的
+账户不会被推送**（但照样会正常暂停）。
+
+**推送条数**由 `NOTIFY_GROUPING` 决定，本质是「账户按投递目标归组」：
 
 | 值 | 行为 |
 |----|------|
-| `combined`（默认） | 所有账户合成一条推送 |
-| `per_account` | 一个账户一条推送 |
+| `combined`（默认） | 发往**同一个 token** 的账户合成一条 |
+| `per_account` | 一个账户一条推送（即使它们共用 token） |
 
-两个开关是独立的，可以组合。**`on_change` + `per_account` 通常最好用**：只有真的
-从「运行中」变成「已暂停」的账户才会单独通知你，本来就暂停的账户完全不打扰；
-出问题的账户则各自带自己的失败原因。
+所以：
+
+- 所有账户共用一个 token → `combined` 就是一条汇总
+- 每个账户各自的 token → `combined` 也是每账户一条（因为目标本来就不同）
+- 混合场景 → 同 token 的合并，不同 token 的分开
+
+两个开关独立，可以组合。**`on_change` 通常最好用**：只有真的从「运行中」变成
+「已暂停」的账户才会通知你，本来就暂停的账户完全不打扰；出问题的账户则各自带
+自己的失败原因。配合每账户独立 token，每个人只会收到自己账号的消息。
 
 **失败一定会推送**，与 `NOTIFY_MODE` 无关——包括重试耗尽的情况，失败原因里会带上
 重试次数，例如：
@@ -153,7 +177,7 @@ PASSWORD_2=另一个密码
 • 账户2 139****9000：已经是暂停状态
 ```
 
-`per_account` 则是一个账户一条，标题带上账户标识：
+账户各自有 token（或 `per_account`）时，一个账户一条，标题带上账户标识：
 
 ```
 标题：雷神加速器：账户2 139****9000 已暂停

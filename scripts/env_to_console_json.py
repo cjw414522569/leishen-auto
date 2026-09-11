@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import find_env_file, parse_env_file  # noqa: E402
 
 # 函数会读取的键：账户相关的按前缀收，其余按固定名单
-ACCOUNT_PREFIXES = ("PHONE", "PASSWORD")
+# 按账户编号成组的前缀：PUSHPLUS_TOKEN_n 是账户专属的推送 token
+ACCOUNT_PREFIXES = ("PHONE", "PASSWORD", "PUSHPLUS_TOKEN")
 COMMON_KEYS = (
     "COUNTRY_CODE",
     "SRC_CHANNEL",
