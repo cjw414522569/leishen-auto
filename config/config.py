@@ -16,6 +16,7 @@ from api.client import (
     DEFAULT_SRC_CHANNEL,
 )
 from api.sign import md5_hex
+from notify import DEFAULT_TEMPLATE, NOTIFY_MODES, NotifySettings
 
 INDEXED_PHONE_RE = re.compile(r"^PHONE_(\d+)$")
 INDEXED_PASSWORD_RE = re.compile(r"^PASSWORD_(\d+)$")
@@ -140,6 +141,7 @@ class Config:
     src_channel: str = DEFAULT_SRC_CHANNEL
     retries: int = DEFAULT_RETRIES
     show_token: bool = False
+    notify: NotifySettings = field(default_factory=NotifySettings)
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -236,6 +238,41 @@ def _resolve_retries(source: Mapping[str, str]) -> int:
     return value
 
 
+def _notify_settings(source: Mapping[str, str]) -> NotifySettings:
+    """读取推送配置。没有 PUSHPLUS_TOKEN 就相当于停用。"""
+    mode = _get(source, "NOTIFY_MODE").lower() or NOTIFY_MODES[0]
+    if mode not in NOTIFY_MODES:
+        raise ConfigError(
+            f"NOTIFY_MODE 只能是 {' 或 '.join(NOTIFY_MODES)}，当前为 {mode!r}"
+        )
+    return NotifySettings(
+        token=_get(source, "PUSHPLUS_TOKEN"),
+        topic=_get(source, "PUSHPLUS_TOPIC"),
+        template=_get(source, "PUSHPLUS_TEMPLATE") or DEFAULT_TEMPLATE,
+        mode=mode,
+    )
+
+
+def _resolve_source(
+    env_file: str | PathLike[str] | None, environ: Mapping[str, str] | None
+) -> Mapping[str, str]:
+    if environ is not None:
+        return environ
+    return merge_config_sources(load_env_file(env_file), os.environ)
+
+
+def load_notify_settings(
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> NotifySettings:
+    """只加载推送配置。
+
+    账户配置出错时主流程拿不到 ``Config``，但仍要能把失败原因推出去，
+    所以单独开一个入口。
+    """
+    return _notify_settings(_resolve_source(env_file, environ))
+
+
 def collect_accounts(source: Mapping[str, str]) -> list[Account]:
     """收集账户。
 
@@ -306,10 +343,7 @@ def load_config(
     每个账户用 ``PHONE*`` + ``PASSWORD*``（明文，程序会按接口要求做 MD5）自动登录
     换取令牌，无需手工维护令牌。
     """
-    if environ is None:
-        source: Mapping[str, str] = merge_config_sources(load_env_file(env_file), os.environ)
-    else:
-        source = environ
+    source = _resolve_source(env_file, environ)
 
     accounts = collect_accounts(source)
     if not accounts:
@@ -326,4 +360,5 @@ def load_config(
         src_channel=_get(source, "SRC_CHANNEL") or DEFAULT_SRC_CHANNEL,
         retries=_resolve_retries(source),
         show_token=_flag(source, "SHOW_TOKEN"),
+        notify=_notify_settings(source),
     )

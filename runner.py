@@ -13,7 +13,14 @@ from api import (
     LoginError,
     LoginInfo,
 )
-from config import Account, Config, ConfigError, load_config
+from config import Account, Config, ConfigError, load_config, load_notify_settings
+from notify import (
+    NotifySettings,
+    PushPlusNotifier,
+    format_content,
+    format_title,
+    should_notify,
+)
 from token_cache import CacheEntry, TokenCache
 
 Logger = Callable[[str], None]
@@ -144,6 +151,31 @@ def _pause_account(
     return AccountResult(account.label, True, "pause", resp.code, resp.msg)
 
 
+def _notify(settings: NotifySettings, result: Result, log: Logger) -> None:
+    """推送运行结果。
+
+    推送失败只记一行日志——通知发不出去不该改变本次运行的结果。
+    """
+    if not should_notify(settings, result):
+        return
+
+    notifier = PushPlusNotifier(settings.token, settings.topic, settings.template)
+    if notifier.send(format_title(result), format_content(result)):
+        # PushPlus 是异步接口，这里只代表服务端受理了
+        log(f"📮已提交推送（模式 {settings.mode}）")
+    else:
+        log("⚠️推送提交失败（不影响本次运行结果）")
+
+
+def _notify_config_error(environ: Mapping[str, str] | None, exc: Exception, log: Logger) -> None:
+    """账户配置出错时也要能通知出去，所以单独读一次推送配置。"""
+    try:
+        settings = load_notify_settings(environ=environ)
+    except ConfigError:
+        return  # 推送配置本身也有问题，只能作罢
+    _notify(settings, Result(False, "config", message=str(exc)), log)
+
+
 def pause_all(
     log: Logger = print,
     environ: Mapping[str, str] | None = None,
@@ -162,6 +194,7 @@ def pause_all(
         cfg = load_config(environ=environ)
     except ConfigError as exc:
         log(f"❌错误: {exc}")
+        _notify_config_error(environ, exc, log)
         return Result(False, "config", message=str(exc))
 
     client = Client(retries=cfg.retries)
@@ -185,8 +218,11 @@ def pause_all(
 
     first_failure = next((r for r in results if not r.ok), None)
     if first_failure is None:
-        return Result(True, "done", 0, "", results)
+        result = Result(True, "done", 0, "", results)
+    else:
+        result = Result(
+            False, first_failure.step, first_failure.code, first_failure.message, results
+        )
 
-    return Result(
-        False, first_failure.step, first_failure.code, first_failure.message, results
-    )
+    _notify(cfg.notify, result, log)
+    return result

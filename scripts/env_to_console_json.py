@@ -23,7 +23,17 @@ from config import find_env_file, parse_env_file  # noqa: E402
 
 # 函数会读取的键：账户相关的按前缀收，其余按固定名单
 ACCOUNT_PREFIXES = ("PHONE", "PASSWORD")
-COMMON_KEYS = ("COUNTRY_CODE", "SRC_CHANNEL", "API_LANG", "RETRIES", "SHOW_TOKEN")
+COMMON_KEYS = (
+    "COUNTRY_CODE",
+    "SRC_CHANNEL",
+    "API_LANG",
+    "RETRIES",
+    "SHOW_TOKEN",
+    "PUSHPLUS_TOKEN",
+    "PUSHPLUS_TOPIC",
+    "PUSHPLUS_TEMPLATE",
+    "NOTIFY_MODE",
+)
 
 
 def is_function_key(name: str) -> bool:

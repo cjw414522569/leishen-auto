@@ -29,8 +29,9 @@ DEFAULT_SRC_CHANNEL = "guanwang"
 OS_TYPE_WEB = 4
 
 # 页面上的错误码（chunk-common.js -> c.HTTP_*）
-CODE_ALREADY_PAUSED = 400803  # 账号已经停止加速，请不要重复操作
+CODE_OK = 0  # 操作成功——暂停这个动作是真的执行了，账号状态发生了变化
 CODE_TOKEN_EXPIRED = 400006  # 令牌过期，页面据此跳回登录
+CODE_ALREADY_PAUSED = 400803  # 账号已经停止加速，请不要重复操作
 
 
 class APIError(Exception):

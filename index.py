@@ -28,7 +28,17 @@ MAX_ACCOUNTS = 50
 
 # 不带编号的键 + 与账户无关的通用键
 BASE_KEYS = ("PHONE", "PASSWORD")
-COMMON_KEYS = ("COUNTRY_CODE", "SRC_CHANNEL", "API_LANG", "RETRIES", "SHOW_TOKEN")
+COMMON_KEYS = (
+    "COUNTRY_CODE",
+    "SRC_CHANNEL",
+    "API_LANG",
+    "RETRIES",
+    "SHOW_TOKEN",
+    "PUSHPLUS_TOKEN",
+    "PUSHPLUS_TOPIC",
+    "PUSHPLUS_TEMPLATE",
+    "NOTIFY_MODE",
+)
 
 
 class _PrintLogger:
