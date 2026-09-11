@@ -45,19 +45,19 @@ leishen-auto/
 
 ---
 
-## 🧭 三种运行方式
+## 🧭 四种运行方式
 
-核心逻辑（`runner.py` + `api/` + `config/`）三个入口共用，区别只在**配置从哪来**和
-**要不要缓存令牌**：
+核心逻辑（`runner.py` + `api/` + `config/`）所有入口共用，区别只在**配置从哪来**、
+**要不要缓存令牌**、**由谁触发**：
 
-| | 本地命令行 | 华为云 FunctionGraph | GitHub Actions |
-|---|---|---|---|
-| 入口 | `main.py` | `index.py`（`index.handler`） | `main.py --no-cache` |
-| 配置来源 | `.env` / 环境变量 | 控制台环境变量 | 仓库 Secrets |
-| 令牌缓存 | ✅ 存本地 `.token_cache.json` | ❌ 无持久盘 | ❌ runner 每次全新 |
-| 触发方式 | 手动 / 系统计划任务 | 定时触发器 | cron |
+| | 本地命令行 | Docker | 华为云 FunctionGraph | GitHub Actions |
+|---|---|---|---|---|
+| 入口 | `main.py` | `main.py`（容器里常驻） | `index.py`（`index.handler`） | `main.py --no-cache` |
+| 配置来源 | `.env` / 环境变量 | `.env`（compose 注入） | 控制台环境变量 | 仓库 Secrets |
+| 令牌缓存 | ✅ 存本地 | ✅ 存卷里 | ❌ 无持久盘 | ❌ runner 每次全新 |
+| 触发方式 | 手动 / 系统计划任务 / `RUN_CRON` | `RUN_CRON` | 定时触发器 | cron |
 
-**只有本地运行会缓存令牌**——云函数和 Actions 的存储都是一次性的，存了也带不到
+**本地与 Docker 会缓存令牌**——云函数和 Actions 的存储都是一次性的，存了也带不到
 下一次。下面分别说明。
 
 ---
@@ -82,7 +82,8 @@ leishen-auto/
 | `PUSHPLUS_TEMPLATE` | `txt` | 消息模板（`txt` / `html` / `markdown` / `json`） |
 | `NOTIFY_MODE` | `always` | 推送时机，见下文 |
 | `NOTIFY_GROUPING` | `combined` | 推送条数：`combined` 汇总一条 / `per_account` 一账户一条 |
-| `RUN_CRON` | — | **仅本地**：定时运行的 cron 表达式；留空则跑一次就退出 |
+| `RUN_CRON` | — | **仅本地/Docker**：定时运行的 cron 表达式；留空则跑一次就退出 |
+| `TOKEN_CACHE_FILE` | — | **仅本地/Docker**：令牌缓存文件位置；留空用默认位置 |
 
 ### 多账户
 
@@ -452,6 +453,76 @@ python main.py --no-cache     # 每次都重新登录，也不写缓存文件
   POSIX 上会把文件权限设成 `600`。
 - 文件损坏或被手改坏时会退化成一没有缓存，只影响本次是否复用，不会让程序报错。
 - 想强制重新登录，直接删掉 `.token_cache.json` 即可。
+
+---
+
+## 🐳 方式四：Docker（常驻定时）
+
+适合让它在 NAS、小主机或云服务器上一直跑着，到点自己暂停。**容器里跑的是定时
+模式**，由 `docker-compose.yml` 的 `RUN_CRON` 控制。
+
+零第三方依赖，所以镜像里没有 `pip install` 这一步，构建很快。
+
+### 1. 准备配置
+
+```bash
+cp .env.example .env
+# 编辑 .env，填入 PHONE_1 与 PASSWORD_1（以及可选推送配置）
+```
+
+`.env` 通过 compose 的 `env_file` 注入容器，**不会被打进镜像**（`.dockerignore`
+里排除了，否则密码会留在镜像层里）。
+
+### 2. 改运行时间
+
+编辑 `docker-compose.yml` 里的 `RUN_CRON`：
+
+```yaml
+    environment:
+      RUN_CRON: "0 1 * * *"     # 每天凌晨 1 点
+      TZ: Asia/Shanghai
+```
+
+**`TZ` 必须设对。** cron 是按「本机时区」算的，而容器默认是 UTC——不设的话
+`0 1 * * *` 会跑在北京时间早上 9 点。
+
+### 3. 启动
+
+```bash
+docker compose up -d --build
+docker compose logs -f          # 看日志
+docker compose down             # 停止
+```
+
+跑起来长这样：
+
+```
+⏰定时模式已开启（0 1 * * *），按 Ctrl+C 退出
+[2026-09-11 22:09:44] 😴下次运行：2026-09-12 01:00:00（2 小时 50 分钟后）
+[2026-09-12 01:00:00] ⌛️开始运行
+[2026-09-12 01:00:00] 🔑复用本地缓存的令牌（有效期至 2026-09-18 12:50:10）
+[2026-09-12 01:00:00] 👌已经暂停: 400803 - 账号已经停止加速，请不要重复操作
+```
+
+### 令牌缓存在容器里怎么存
+
+`TOKEN_CACHE_FILE` 指向 `/data/.token_cache.json`，`/data` 挂在具名卷 `token-cache`
+上。所以 **`docker compose up --build` 重建容器后不用重新登录**。
+
+想强制重新登录：
+
+```bash
+docker compose down -v          # -v 会一并删掉卷（也就是删掉缓存）
+```
+
+几点说明：
+
+- **`.env` 不要用 bind mount 挂进容器**——`env_file` 已经把它注入了，再挂一次
+  反而会把宿主机目录暴露给容器
+- 容器用非 root 用户跑；具名卷首次挂载会继承镜像里 `/data` 的属主，所以不用手动
+  `chown`
+- `logging` 里给日志加了 10MB × 3 的上限，常驻进程不会把磁盘写满
+- 想一次性跑完就退出（不进定时模式），把 `RUN_CRON` 那行删掉即可
 
 ---
 

@@ -147,6 +147,8 @@ class Config:
     notify: NotifySettings = field(default_factory=NotifySettings)
     # 本地定时运行的 cron 表达式；None 表示跑一次就退出。云函数/Actions 不看这个
     run_cron: CronExpr | None = None
+    # 令牌缓存文件的位置；空表示用默认位置（项目根目录下）。Docker 里指向挂载的卷
+    cache_file: str = ""
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -250,6 +252,14 @@ def load_run_cron(
 ) -> CronExpr | None:
     """只读本地定时运行的 cron 表达式；None 表示跑一次就退出。"""
     return parse_run_cron(_resolve_source(env_file, environ))
+
+
+def load_cache_file(
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """只读令牌缓存文件的位置；空表示用默认位置。"""
+    return _get(_resolve_source(env_file, environ), "TOKEN_CACHE_FILE")
 
 
 def _resolve_retries(source: Mapping[str, str]) -> int:
@@ -401,4 +411,5 @@ def load_config(
         show_token=_flag(source, "SHOW_TOKEN"),
         notify=_notify_settings(source),
         run_cron=parse_run_cron(source),
+        cache_file=_get(source, "TOKEN_CACHE_FILE"),
     )

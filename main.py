@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime
 
-from config import ConfigError, load_run_cron
+from config import ConfigError, load_cache_file, load_run_cron
 from cron import CronExpr, next_run
 from runner import pause_all
 from token_cache import TokenCache
@@ -123,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     force_utf8_output()
 
-    cache = None if args.no_cache else TokenCache()
+    cache = None if args.no_cache else TokenCache(load_cache_file() or None)
 
     try:
         cron = load_run_cron()

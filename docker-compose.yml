@@ -1,0 +1,44 @@
+# 雷神加速器自动暂停——常驻定时模式
+#
+#   docker compose up -d --build     启动（后台常驻）
+#   docker compose logs -f           看日志
+#   docker compose down              停止
+#
+# 账户配置来自同目录的 .env（见 .env.example），不要在 compose 里写密码。
+
+services:
+  leishen-auto:
+    build: .
+    image: leishen-auto
+    container_name: leishen-auto
+    restart: unless-stopped
+
+    # 账户、密码、推送 token 等全部从 .env 读，容器不碰宿主机其它东西
+    env_file:
+      - .env
+
+    environment:
+      # 定时模式：到点跑一次就接着等下一次。
+      # 想改时间就改这行，写法是标准 5 段 cron：分 时 日 月 星期
+      RUN_CRON: "0 1 * * *"
+
+      # cron 按本机时区算。容器默认 UTC，不设这个「凌晨 1 点」会变成北京时间早上 9 点。
+      # 改成你的时区，例如 Asia/Shanghai / Asia/Tokyo / UTC
+      TZ: Asia/Shanghai
+
+      # 令牌缓存落到下面那个卷里，容器重建后不用重新登录
+      TOKEN_CACHE_FILE: /data/.token_cache.json
+
+    volumes:
+      # 具名卷：缓存跨容器重建保留。它等同凭据，别换成会被同步盘扫的宿主机目录
+      - token-cache:/data
+
+    logging:
+      # 常驻进程会产生不少日志，给它加个上限，免得把磁盘写满
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  token-cache:

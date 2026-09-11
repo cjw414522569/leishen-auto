@@ -1,0 +1,23 @@
+# 凭据绝不能进镜像层——镜像层是可以被导出和翻查的
+.env
+.token_cache.json
+.token_cache.json.tmp
+
+# 构建产物与临时文件
+dist/
+*.zip
+__pycache__/
+*.py[cod]
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# 单元测试只保留在本地，不进镜像
+tests/
+
+# 文档（运行时用不到）
+README.md
+LICENSE
