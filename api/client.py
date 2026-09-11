@@ -233,8 +233,11 @@ class Client:
         - 传输层异常（连接被拒、超时等）
         - HTTP 5xx
         - **HTTP 2xx 但响应体不是合法 JSON**——网关抖动时会返回空体或 HTML 错误页
+        - **HTTP 4xx 但响应体不是 JSON**——请求没到业务接口，中间被 WAF / CDN
+          拦了（线上真实踩到过：403 + 一个 HTML 拦截页）
 
-        4xx 是确定性错误，重试没有意义，直接交给上层判断业务错误码。
+        能解析出业务错误码的 4xx 才是确定性错误（比如密码错），那种不重试，
+        直接交给上层判断。
         """
         try:
             body = json.dumps(payload)
@@ -257,8 +260,14 @@ class Client:
                 last_error, last_exc = f"发送请求失败: {exc}", exc
             else:
                 if 400 <= resp.status_code < 500:
-                    return self._parse(resp)  # 确定性错误，不重试
-                if resp.status_code >= 500:
+                    try:
+                        return self._parse(resp)
+                    except APIError as exc:
+                        # 4xx 但响应体不是我们的 JSON —— 说明请求根本没到业务接口，
+                        # 中间多半是 WAF / CDN / 代理的拦截页（往往是 HTML）。那属于
+                        # 基础设施问题，值得重试；能解析出业务码的 4xx 才是确定性错误。
+                        last_error = f"发送请求失败: HTTP {resp.status_code}（{exc}）"
+                elif resp.status_code >= 500:
                     last_error = f"发送请求失败: HTTP {resp.status_code}"
                 elif resp.status_code >= 300:
                     # urllib 已经尽力跟随重定向了，还落在这一档说明跟不动——

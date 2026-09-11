@@ -8,7 +8,8 @@
  *   - 网络异常（fetch 抛异常）
  *   - HTTP 5xx
  *   - HTTP 2xx 但响应体不是合法 JSON（网关抖动会返回空体或 HTML 错误页）
- * 4xx 是确定性错误，不重试。
+ *   - HTTP 4xx 但响应体不是 JSON（请求没到业务接口，中间被 WAF / CDN 拦了）
+ * 能解析出业务错误码的 4xx 才是确定性错误（比如密码错），那种不重试。
  */
 
 import { signParams } from "./sign.js";
@@ -116,9 +117,15 @@ export class Client {
 
       if (response) {
         if (response.status >= 400 && response.status < 500) {
-          return this.parse(response); // 确定性错误，不重试
-        }
-        if (response.status >= 500) {
+          try {
+            return await this.parse(response);
+          } catch (error) {
+            // 4xx 但响应体不是我们的 JSON —— 说明请求根本没到业务接口，中间
+            // 多半是 WAF / CDN 的拦截页。那属于基础设施问题，值得重试；
+            // 能解析出业务码的 4xx 才是确定性错误。
+            lastError = `发送请求失败: HTTP ${response.status}（${error.message}）`;
+          }
+        } else if (response.status >= 500) {
           lastError = `发送请求失败: HTTP ${response.status}`;
         } else if (response.status >= 300) {
           lastError = `发送请求失败: 意外的重定向 HTTP ${response.status}`;
