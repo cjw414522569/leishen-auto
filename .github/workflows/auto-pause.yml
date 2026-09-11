@@ -1,0 +1,34 @@
+name: Auto Pause Leishen
+
+on:
+  schedule:
+    # 每天北京时间凌晨 1 点（UTC 17:00）
+    - cron: '0 17 * * *'
+  # 也可以在 Actions 页面手动触发
+  workflow_dispatch:
+
+jobs:
+  pause:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 本项目零第三方依赖，不需要 pip install
+      - name: 自动登录并暂停加速
+        # GitHub Secrets 必须在工作流里逐个显式映射成环境变量。
+        # 加账户时：在这里补 PHONE_n / PASSWORD_n，并到
+        # Settings → Secrets and variables → Actions 添加同名 Secret。
+        env:
+          PHONE_1: ${{ secrets.PHONE_1 }}
+          PASSWORD_1: ${{ secrets.PASSWORD_1 }}
+          PHONE_2: ${{ secrets.PHONE_2 }}
+          PASSWORD_2: ${{ secrets.PASSWORD_2 }}
+          # 单账户写法（不带编号）也可以，把上面两组换成这两行即可：
+          # PHONE: ${{ secrets.PHONE }}
+          # PASSWORD: ${{ secrets.PASSWORD }}
+        # --no-cache：runner 每次都是全新环境，令牌缓存存了也带不到下一次
+        run: python main.py --no-cache

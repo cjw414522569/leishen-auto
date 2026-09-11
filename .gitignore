@@ -1,0 +1,18 @@
+# 含账号密码，切勿提交
+.env
+
+# 登录令牌缓存（等同凭据），切勿提交
+.token_cache.json
+.token_cache.json.tmp
+
+# 打包产物
+dist/
+*.zip
+
+# 单元测试只保留在本地，不推送到远端
+tests/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/

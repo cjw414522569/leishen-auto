@@ -1,0 +1,7 @@
+# 统一用 LF：仓库同时会在 Windows 本地和 Linux（GitHub Actions / 云函数）上使用
+* text=auto eol=lf
+
+# 二进制文件不要做换行转换
+*.png binary
+*.jpg binary
+*.zip binary
