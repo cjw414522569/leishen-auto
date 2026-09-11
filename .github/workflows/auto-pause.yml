@@ -19,10 +19,13 @@ jobs:
 
       # 本项目零第三方依赖，不需要 pip install
       - name: 自动登录并暂停加速
-        # GitHub Secrets 必须在工作流里逐个显式映射成环境变量。
-        # 加账户时：在这里补 PHONE_n / PASSWORD_n，并到
-        # Settings → Secrets and variables → Actions 添加同名 Secret。
+        # GitHub Actions 要求把变量**逐个显式映射**成环境变量——没在这写的
+        # 变量，程序根本读不到，配了同名 Secret 也没用。
+        # 没配的 Secret 会展开成空字符串，程序按「未设置」处理，不会有副作用。
         env:
+          # ============ 账户 ============
+          # 加账户时：在这里补 PHONE_n / PASSWORD_n，并到
+          # Settings → Secrets and variables → Actions 添加同名 Secret。
           PHONE_1: ${{ secrets.PHONE_1 }}
           PASSWORD_1: ${{ secrets.PASSWORD_1 }}
           PHONE_2: ${{ secrets.PHONE_2 }}
@@ -30,12 +33,21 @@ jobs:
           # 单账户写法（不带编号）也可以，把上面两组换成这两行即可：
           # PHONE: ${{ secrets.PHONE }}
           # PASSWORD: ${{ secrets.PASSWORD }}
-          # PushPlus 推送（可选）。没配这些 Secret 时为空字符串，等于不推送。
+
+          # ============ PushPlus 推送（可选）============
+          # 全部留空 = 不推送。token 在 https://www.pushplus.plus 获取。
+          # 全局 token：所有账户默认用它推送
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          # 想让每个账户推给自己的 token，把对应的 Secret 配上并取消注释：
-          # PUSHPLUS_TOKEN_1: ${{ secrets.PUSHPLUS_TOKEN_1 }}
-          # PUSHPLUS_TOKEN_2: ${{ secrets.PUSHPLUS_TOKEN_2 }}
-          # 想只在真暂停时才收到通知，把下面这行取消注释：
-          # NOTIFY_MODE: on_change
+          # 群组编码：填了就推给整个群组，留空只推给自己
+          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+          # 账户专属 token：配了的话那个账户推给它自己，不填回落到全局那个
+          PUSHPLUS_TOKEN_1: ${{ secrets.PUSHPLUS_TOKEN_1 }}
+          PUSHPLUS_TOKEN_2: ${{ secrets.PUSHPLUS_TOKEN_2 }}
+          # 消息模板：留空默认 txt，可填 html / markdown / json
+          PUSHPLUS_TEMPLATE: ${{ secrets.PUSHPLUS_TEMPLATE }}
+          # 推送时机：留空默认 always，可填 on_change（只在真暂停时才推）
+          NOTIFY_MODE: ${{ secrets.NOTIFY_MODE }}
+          # 推送条数：留空默认 combined，可填 per_account（一账户一条）
+          NOTIFY_GROUPING: ${{ secrets.NOTIFY_GROUPING }}
         # --no-cache：runner 每次都是全新环境，令牌缓存存了也带不到下一次
         run: python main.py --no-cache

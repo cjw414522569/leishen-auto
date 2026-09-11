@@ -247,6 +247,19 @@ python scripts/build_functiongraph_zip.py
 | `PHONE_2` | 第二个账户的手机号 |
 | `PASSWORD_2` | 第二个账户的密码（明文） |
 
+推送相关（**全部可选**，留空则不推送 / 用默认值）：
+
+| 键 | 默认 | 说明 |
+|----|------|------|
+| `PUSHPLUS_TOKEN` | — | PushPlus 全局 token；留空则不推送 |
+| `PUSHPLUS_TOKEN_1`… | — | 各账户专属的推送 token，不填回落到全局那个 |
+| `PUSHPLUS_TOPIC` | — | 群组编码，填了推给整个群组 |
+| `PUSHPLUS_TEMPLATE` | `txt` | 消息模板（`txt` / `html` / `markdown` / `json`） |
+| `NOTIFY_MODE` | `always` | 推送时机：`always` / `on_change` |
+| `NOTIFY_GROUPING` | `combined` | 推送条数：`combined` / `per_account` |
+
+其余可选变量：`COUNTRY_CODE`、`SRC_CHANNEL`、`API_LANG`、`RETRIES`、`SHOW_TOKEN`。
+
 **批量录入**：控制台支持 JSON 格式编辑，点「使用 JSON 格式编辑」后一次粘贴全部配置，
 不用在表单里一个个加。可以先在本地 `.env` 里维护，再用脚本生成这段 JSON：
 
@@ -262,9 +275,11 @@ python scripts/env_to_console_json.py
 ```json
 {
     "PHONE_1": "13800138000",
-    "PASSWORD_1": "2ab96390c7dbe3439de74d0c9b0b1767",
+    "PASSWORD_1": "你的密码",
+    "PUSHPLUS_TOKEN_1": "账户1的推送token",
     "PHONE_2": "13900139000",
-    "PASSWORD_2": "c56a0664e6b1041c5d819e6531335813"
+    "PASSWORD_2": "另一个密码",
+    "PUSHPLUS_TOKEN_2": "账户2的推送token"
 }
 ```
 
@@ -333,10 +348,25 @@ CRON_TZ=Asia/Shanghai 0 0 1 * * *
 
 1. **Fork 本项目**
 2. **配置 Secrets**：仓库 → Settings → Secrets and variables → Actions → New repository secret
+
+   **账户（至少配一组）**
    - `PHONE_1` = 第一个账户的手机号
    - `PASSWORD_1` = 第一个账户的密码（明文）
-   - 有多个账户就继续加 `PHONE_2` / `PASSWORD_2` …（加完记得在 workflow 的 `env:` 里也补一行）
-   - 工作流里需要把用到的变量逐个传给程序（见 `.github/workflows/auto-pause.yml`）
+   - 有多个账户就继续加 `PHONE_2` / `PASSWORD_2` …
+
+   **PushPlus 推送（可选，全部留空则不推送）**
+   - `PUSHPLUS_TOKEN` = 全局推送 token
+   - `PUSHPLUS_TOKEN_1` / `PUSHPLUS_TOKEN_2` = 各账户专属 token（可选）
+   - `PUSHPLUS_TOPIC` = 群组编码（可选）
+   - `PUSHPLUS_TEMPLATE` = 消息模板，留空用 `txt`
+   - `NOTIFY_MODE` = 推送时机，留空用 `always`
+   - `NOTIFY_GROUPING` = 推送条数，留空用 `combined`
+
+   > ⚠️ **加变量必须改两处。** GitHub Actions 不会自动把 Secrets 传进程序——
+   > 每个变量都要在 `.github/workflows/auto-pause.yml` 的 `env:` 里显式映射一行。
+   > **只在 Secrets 里加了、没在工作流里映射，程序是读不到的。**
+   > 工作流里已经把上面这些变量都列好了，改动时照着补即可。
+
 3. **启用工作流**：进入 Actions 标签页，选择 "Auto Pause Leishen"，
    点 "Run workflow" 手动跑一次验证
 4. 之后会在每天北京时间凌晨 1 点自动运行
