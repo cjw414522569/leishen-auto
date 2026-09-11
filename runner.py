@@ -17,9 +17,7 @@ from config import Account, Config, ConfigError, load_config, load_notify_settin
 from notify import (
     NotifySettings,
     PushPlusNotifier,
-    format_content,
-    format_title,
-    should_notify,
+    build_messages,
 )
 from token_cache import CacheEntry, TokenCache
 
@@ -156,15 +154,18 @@ def _notify(settings: NotifySettings, result: Result, log: Logger) -> None:
 
     推送失败只记一行日志——通知发不出去不该改变本次运行的结果。
     """
-    if not should_notify(settings, result):
+    messages = build_messages(settings, result)
+    if not messages:
         return
 
     notifier = PushPlusNotifier(settings.token, settings.topic, settings.template)
-    if notifier.send(format_title(result), format_content(result)):
+    accepted = sum(1 for title, content in messages if notifier.send(title, content))
+
+    if accepted == len(messages):
         # PushPlus 是异步接口，这里只代表服务端受理了
-        log(f"📮已提交推送（模式 {settings.mode}）")
+        log(f"📮已提交推送 {accepted}/{len(messages)} 条（模式 {settings.mode}）")
     else:
-        log("⚠️推送提交失败（不影响本次运行结果）")
+        log(f"⚠️推送提交失败 {len(messages) - accepted}/{len(messages)} 条（不影响本次运行结果）")
 
 
 def _notify_config_error(environ: Mapping[str, str] | None, exc: Exception, log: Logger) -> None:

@@ -29,6 +29,10 @@ NOTIFY_ALWAYS = "always"  # 每次运行都推
 NOTIFY_ON_CHANGE = "on_change"  # 只在真的有账户从「运行中」变成「已暂停」时推
 NOTIFY_MODES = (NOTIFY_ALWAYS, NOTIFY_ON_CHANGE)
 
+GROUP_COMBINED = "combined"  # 所有账户合成一条推送
+GROUP_PER_ACCOUNT = "per_account"  # 一个账户一条推送
+NOTIFY_GROUPINGS = (GROUP_COMBINED, GROUP_PER_ACCOUNT)
+
 
 @dataclass
 class NotifySettings:
@@ -38,6 +42,7 @@ class NotifySettings:
     topic: str = ""
     template: str = DEFAULT_TEMPLATE
     mode: str = NOTIFY_ALWAYS
+    grouping: str = GROUP_COMBINED
 
     @property
     def enabled(self) -> bool:
@@ -100,7 +105,7 @@ class PushPlusNotifier:
 
 
 def should_notify(settings: NotifySettings, result: Any) -> bool:
-    """判断这次运行该不该推送。
+    """整轮运行该不该推送（``combined`` 模式的判断）。
 
     **失败一定推送**（这是最需要知道的情况）；成功时按模式决定：
 
@@ -114,6 +119,19 @@ def should_notify(settings: NotifySettings, result: Any) -> bool:
         return True
     if settings.mode == NOTIFY_ON_CHANGE:
         return any(account.ok and account.code == CODE_OK for account in result.accounts)
+    return settings.mode == NOTIFY_ALWAYS
+
+
+def should_notify_account(settings: NotifySettings, account: Any) -> bool:
+    """单个账户该不该推送（``per_account`` 模式的判断）。
+
+    判定规则和上面一致，只是把范围缩到一个账户：失败的账户一定推，
+    其余按 ``NOTIFY_MODE`` 决定。
+    """
+    if not account.ok:
+        return True
+    if settings.mode == NOTIFY_ON_CHANGE:
+        return account.code == CODE_OK
     return settings.mode == NOTIFY_ALWAYS
 
 
@@ -158,3 +176,43 @@ def format_content(result: Any, now: datetime | None = None) -> str:
         lines.append(f"• {account.label}：{_describe(account)}")
 
     return "\n".join(lines)
+
+
+def account_title(account: Any) -> str:
+    """``per_account`` 模式下单个账户的推送标题。"""
+    if not account.ok:
+        return f"雷神加速器：{account.label} 执行失败"
+    if account.code == CODE_ALREADY_PAUSED:
+        return f"雷神加速器：{account.label} 无需处理"
+    return f"雷神加速器：{account.label} 已暂停"
+
+
+def account_content(account: Any, now: datetime | None = None) -> str:
+    """``per_account`` 模式下单个账户的推送正文。"""
+    stamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    icon = "✅" if account.ok else "❌"
+    return f"{stamp}\n\n{icon} {account.label}：{_describe(account)}"
+
+
+def build_messages(
+    settings: NotifySettings, result: Any, now: datetime | None = None
+) -> list[tuple[str, str]]:
+    """按配置算出这次要发哪几条推送，返回 ``[(标题, 正文), ...]``。
+
+    空列表表示不发。``per_account`` 是「一个账户一条」，``combined`` 是
+    「所有账户合成一条」；账户配置阶段就失败（没有逐账户信息）时，
+    两种组合都退化成一条汇总。
+    """
+    if not settings.enabled:
+        return []
+
+    if settings.grouping == GROUP_PER_ACCOUNT and result.accounts:
+        return [
+            (account_title(account), account_content(account, now))
+            for account in result.accounts
+            if should_notify_account(settings, account)
+        ]
+
+    if should_notify(settings, result):
+        return [(format_title(result), format_content(result, now))]
+    return []

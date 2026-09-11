@@ -16,7 +16,7 @@ from api.client import (
     DEFAULT_SRC_CHANNEL,
 )
 from api.sign import md5_hex
-from notify import DEFAULT_TEMPLATE, NOTIFY_MODES, NotifySettings
+from notify import DEFAULT_TEMPLATE, NOTIFY_GROUPINGS, NOTIFY_MODES, NotifySettings
 
 INDEXED_PHONE_RE = re.compile(r"^PHONE_(\d+)$")
 INDEXED_PASSWORD_RE = re.compile(r"^PASSWORD_(\d+)$")
@@ -245,11 +245,19 @@ def _notify_settings(source: Mapping[str, str]) -> NotifySettings:
         raise ConfigError(
             f"NOTIFY_MODE 只能是 {' 或 '.join(NOTIFY_MODES)}，当前为 {mode!r}"
         )
+
+    grouping = _get(source, "NOTIFY_GROUPING").lower() or NOTIFY_GROUPINGS[0]
+    if grouping not in NOTIFY_GROUPINGS:
+        raise ConfigError(
+            f"NOTIFY_GROUPING 只能是 {' 或 '.join(NOTIFY_GROUPINGS)}，当前为 {grouping!r}"
+        )
+
     return NotifySettings(
         token=_get(source, "PUSHPLUS_TOKEN"),
         topic=_get(source, "PUSHPLUS_TOPIC"),
         template=_get(source, "PUSHPLUS_TEMPLATE") or DEFAULT_TEMPLATE,
         mode=mode,
+        grouping=grouping,
     )
 
 
