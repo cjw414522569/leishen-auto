@@ -486,6 +486,15 @@ cp .env.example .env
 **`TZ` 必须设对。** cron 是按「本机时区」算的，而容器默认是 UTC——不设的话
 `0 1 * * *` 会跑在北京时间早上 9 点。
 
+启动日志里会打出生效的时区，一眼就能确认有没有设对：
+
+```
+⏰定时模式已开启（0 1 * * *，本机时区 CST+0800），按 Ctrl+C 退出
+```
+
+如果打出的是 `UTC+0000`，说明 `TZ` 没生效（镜像里少了 tzdata，或 compose 里
+`TZ` 写错了），这时 `0 1 * * *` 会按 UTC 触发。
+
 ### 3. 启动
 
 ```bash
@@ -514,6 +523,38 @@ docker compose down             # 停止
 ```bash
 docker compose down -v          # -v 会一并删掉卷（也就是删掉缓存）
 ```
+
+### 构建太慢？（国内网络）
+
+慢通常卡在两处，**分别用不同办法治**：
+
+**1. 拉基础镜像慢** —— 这是 Docker **守护进程**的设置，Dockerfile 管不了。
+
+Docker Desktop：`Settings` → `Docker Engine`，在 JSON 里加：
+
+```json
+{
+  "registry-mirrors": ["https://镜像加速地址"]
+}
+```
+
+保存后重启 Docker。镜像加速站时有失效，用之前先确认当前可用。
+
+**2. `apt-get` 慢** —— 这个在 Dockerfile 里，已经默认换成阿里云源了：
+
+```dockerfile
+ARG APT_MIRROR=mirrors.aliyun.com
+```
+
+想用回官方源：
+
+```bash
+docker compose build --build-arg APT_MIRROR=deb.debian.org
+```
+
+装 tzdata 那一层的存在意义只是让 `TZ` 生效。如果你能接受不带 tzdata 的精简镜像，
+把 `TZ` 改成 POSIX 写法（`TZ=CST-8` 就表示 UTC+8）也能工作，那样可以整层删掉——
+代价是这写法不直观，且不适用于有夏令时的时区。
 
 几点说明：
 

@@ -97,7 +97,10 @@ def run_forever(cron: CronExpr, cache: TokenCache | None) -> int:
     def stamped(line: str) -> None:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {line}")
 
-    print(f"⏰定时模式已开启（{cron.raw}），按 Ctrl+C 退出")
+    # 把生效的时区打出来：容器里 TZ 没生效时会静默退回 UTC，
+    # 而只看「下次运行 01:00」是看不出问题的——那可能是 UTC 的 01:00。
+    zone = datetime.now().astimezone().strftime("%Z%z") or "未知"
+    print(f"⏰定时模式已开启（{cron.raw}，本机时区 {zone}），按 Ctrl+C 退出")
 
     while True:
         target = next_run(cron, datetime.now())
