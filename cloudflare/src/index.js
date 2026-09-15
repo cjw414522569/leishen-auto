@@ -10,7 +10,7 @@
 import {
   CODE_ALREADY_PAUSED,
   CODE_OK,
-  CODE_TOKEN_EXPIRED,
+  TOKEN_EXPIRED_CODES,
   APIError,
   Client,
   LoginError,
@@ -84,7 +84,7 @@ async function pauseAccount(client, config, account, cache, prefix, log) {
     throw error;
   }
 
-  if (response.code === CODE_TOKEN_EXPIRED && cached) {
+  if (TOKEN_EXPIRED_CODES.has(response.code) && cached) {
     // 缓存里的令牌失效了：丢掉它，重新登录再试一次
     log(`⚠️${prefix}缓存令牌已失效，重新登录`);
     await cache.drop(account.phone);

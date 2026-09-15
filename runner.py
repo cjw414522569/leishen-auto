@@ -7,7 +7,7 @@ from typing import Callable, Mapping
 
 from api import (
     CODE_ALREADY_PAUSED,
-    CODE_TOKEN_EXPIRED,
+    TOKEN_EXPIRED_CODES,
     APIError,
     Client,
     LoginError,
@@ -124,7 +124,7 @@ def _pause_account(
 
         resp = _pause_or_fail(client, cfg, account, token, prefix, log)
 
-        if resp.code == CODE_TOKEN_EXPIRED and cached:
+        if resp.code in TOKEN_EXPIRED_CODES and cached:
             # 缓存里的令牌失效了：丢掉它，重新登录再试一次
             log(f"⚠️{prefix}缓存令牌已失效，重新登录")
             if cache is not None:

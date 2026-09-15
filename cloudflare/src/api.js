@@ -30,7 +30,11 @@ const OS_TYPE_WEB = 4;
 
 export const CODE_OK = 0;
 export const CODE_ALREADY_PAUSED = 400803;
+// 「登录态失效」一族：命中任何一个都该丢弃缓存、重新登录。
+// 400007 是线上实际返回过的「当前登录态已过期，请重新登录」——服务端可以
+// 提前作废令牌，不等 expiry_time。
 export const CODE_TOKEN_EXPIRED = 400006;
+export const TOKEN_EXPIRED_CODES = new Set([400006, 400007]);
 
 export class APIError extends Error {}
 
