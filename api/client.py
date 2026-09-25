@@ -28,6 +28,22 @@ DEFAULT_COUNTRY_CODE = "86"
 DEFAULT_SRC_CHANNEL = "guanwang"
 OS_TYPE_WEB = 4
 
+# 请求头。urllib 在没给 User-Agent 时会自带 "Python-urllib/3.x" —— 那是个极
+# 显眼的「这是脚本」特征，会被 WAF 的机器人规则拦掉（线上真实踩到：418 + 一个
+# HTML 拦截页，重试 10 次全被挡）。所以这里显式带上网页客户端的同款请求头。
+# 如果哪天又被拦，先来改这里的 User-Agent。
+DEFAULT_HEADERS = {
+    "Content-Type": "application/json",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Origin": "https://vip.leigod.com",
+    "Referer": "https://vip.leigod.com/",
+}
+
 # 页面上的错误码（chunk-common.js -> c.HTTP_*）
 CODE_OK = 0  # 操作成功——暂停这个动作是真的执行了，账号状态发生了变化
 CODE_TOKEN_EXPIRED = 400006  # 令牌过期，页面据此跳回登录
@@ -259,7 +275,7 @@ class Client:
                 resp = self.session.post(
                     url,
                     data=body,
-                    headers={"Content-Type": "application/json"},
+                    headers=DEFAULT_HEADERS,
                     timeout=self.timeout,
                 )
             except TransportError as exc:

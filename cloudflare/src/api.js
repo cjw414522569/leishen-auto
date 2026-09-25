@@ -28,6 +28,19 @@ export const DEFAULT_COUNTRY_CODE = "86";
 export const DEFAULT_SRC_CHANNEL = "guanwang";
 const OS_TYPE_WEB = 4;
 
+// 网页客户端的同款请求头。Python 版那边 urllib 会自带 "Python-urllib/3.x"，
+// 被 WAF 的机器人规则拦过（418 + HTML 拦截页），这里一并对齐。
+export const DEFAULT_HEADERS = {
+  "Content-Type": "application/json",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  Accept: "*/*",
+  "Accept-Language": "zh-CN,zh;q=0.9",
+  Origin: "https://vip.leigod.com",
+  Referer: "https://vip.leigod.com/",
+};
+
 export const CODE_OK = 0;
 export const CODE_ALREADY_PAUSED = 400803;
 // 「登录态失效」一族：命中任何一个都该丢弃缓存、重新登录。
@@ -110,7 +123,7 @@ export class Client {
       try {
         response = await this.fetchImpl(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: DEFAULT_HEADERS,
           body,
           signal: AbortSignal.timeout(this.timeout),
         });

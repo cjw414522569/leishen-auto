@@ -737,8 +737,17 @@ A: 这是官网登录接口的老毛病，手动多点几次也能成功。程�
 而不是单纯看状态码——能解析出业务错误码的 4xx（比如密码错）才是确定性错误，
 那种不重试，直接报出来。
 
-网络不稳可以调大 `RETRIES`。如果错误信息里带了 `HTTP 403` 这类状态码却反复失败，
-那多半不是抖动，而是某个中间设备在稳定拦截，调 `RETRIES` 没用。
+网络不稳可以调大 `RETRIES`。
+
+**但如果错误信息里带了 `HTTP 4xx` 状态码、而且重试 10 次全被挡**，那就不是抖动——
+是某个中间设备在**稳定拦截**（WAF 的机器人规则），调 `RETRIES` 没用。典型信号是
+`HTTP 418`（各类 WAF 爱用这个码标记「识别为自动化请求」）+ 一个 HTML 拦截页。
+
+这种情况的常见诱因是**请求指纹**：Python 的 `urllib` 在没给 `User-Agent` 时会自带
+`Python-urllib/3.x`，那是个极显眼的「这是脚本」特征。所以程序默认已经带上网页客户端
+同款的请求头（`User-Agent` / `Accept` / `Accept-Language` / `Origin` / `Referer`），
+定义在 `api/client.py` 的 `DEFAULT_HEADERS`（Cloudflare 那份在 `cloudflare/src/api.js`）。
+**要是哪天又被拦，先去改这里的 `User-Agent`。**
 
 **Q: 为什么不用官方内置的 `requests`？**
 A: FunctionGraph 的 Python 运行时确实内置了 `requests`，但版本是 2015 年的 2.7.0，
