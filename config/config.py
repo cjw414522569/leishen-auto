@@ -24,6 +24,13 @@ INDEXED_PHONE_RE = re.compile(r"^PHONE_(\d+)$")
 INDEXED_PASSWORD_RE = re.compile(r"^PASSWORD_(\d+)$")
 INLINE_COMMENT_RE = re.compile(r"\s+#")
 ENV_FILE_NAME = ".env"
+# 时长：1h / 30m / 90s / 2d，不带单位按秒算
+DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd]?)$")
+DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+# 整轮失败后的重试：间隔与"每几次才推送一次"
+DEFAULT_FAIL_RETRY_INTERVAL = 3600.0
+DEFAULT_FAIL_NOTIFY_EVERY = 5
 
 # 找到这些标记就认为到项目根了，不再往上找 .env
 PROJECT_MARKERS = (".git", "pyproject.toml", "setup.py")
@@ -149,6 +156,9 @@ class Config:
     run_cron: CronExpr | None = None
     # 令牌缓存文件的位置；空表示用默认位置（项目根目录下）。Docker 里指向挂载的卷
     cache_file: str = ""
+    # 整轮失败后的重试策略（仅本地/Docker 的常驻模式用）
+    fail_retry_interval: float = DEFAULT_FAIL_RETRY_INTERVAL  # 秒；0 = 不重试
+    fail_notify_every: int = DEFAULT_FAIL_NOTIFY_EVERY
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -252,6 +262,58 @@ def load_run_cron(
 ) -> CronExpr | None:
     """只读本地定时运行的 cron 表达式；None 表示跑一次就退出。"""
     return parse_run_cron(_resolve_source(env_file, environ))
+
+
+def parse_duration(raw: str) -> float:
+    """把 ``1h`` / ``30m`` / ``90s`` / ``2d`` 解析成秒数。
+
+    不带单位按秒算；空串或 ``0`` 返回 0（表示停用）。
+    """
+    text = str(raw or "").strip().lower()
+    if not text:
+        return 0.0
+
+    match = DURATION_RE.match(text)
+    if not match:
+        raise ConfigError(f"FAIL_RETRY_INTERVAL 格式不对：{raw!r}，应形如 1h / 30m / 90s")
+    return float(match.group(1)) * DURATION_UNITS[match.group(2)]
+
+
+@dataclass(frozen=True)
+class FailRetry:
+    """整轮失败后的重试策略。"""
+
+    interval: float = DEFAULT_FAIL_RETRY_INTERVAL  # 秒；0 = 不重试
+    notify_every: int = DEFAULT_FAIL_NOTIFY_EVERY
+
+
+def _fail_retry(source: Mapping[str, str]) -> FailRetry:
+    raw_interval = _get(source, "FAIL_RETRY_INTERVAL")
+    # 没配就按默认 1 小时；显式配 0 才是「不重试」
+    interval = (
+        DEFAULT_FAIL_RETRY_INTERVAL if raw_interval == "" else parse_duration(raw_interval)
+    )
+
+    raw_every = _get(source, "FAIL_NOTIFY_EVERY")
+    if raw_every == "":
+        notify_every = DEFAULT_FAIL_NOTIFY_EVERY
+    else:
+        try:
+            notify_every = int(raw_every)
+        except ValueError as exc:
+            raise ConfigError(f"FAIL_NOTIFY_EVERY 必须是整数，当前为 {raw_every!r}") from exc
+        if notify_every < 1:
+            raise ConfigError("FAIL_NOTIFY_EVERY 至少为 1")
+
+    return FailRetry(interval=interval, notify_every=notify_every)
+
+
+def load_fail_retry(
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> FailRetry:
+    """只读整轮失败后的重试策略。"""
+    return _fail_retry(_resolve_source(env_file, environ))
 
 
 def load_cache_file(
@@ -401,6 +463,8 @@ def load_config(
             "多账户时使用 PHONE_1/PASSWORD_1、PHONE_2/PASSWORD_2…"
         )
 
+    fail_retry = _fail_retry(source)
+
     return Config(
         accounts=accounts,
         # 不用 LANG 这个名字：POSIX 环境（含 CI 与云函数运行时）用它表示 locale
@@ -412,4 +476,6 @@ def load_config(
         notify=_notify_settings(source),
         run_cron=parse_run_cron(source),
         cache_file=_get(source, "TOKEN_CACHE_FILE"),
+        fail_retry_interval=fail_retry.interval,
+        fail_notify_every=fail_retry.notify_every,
     )

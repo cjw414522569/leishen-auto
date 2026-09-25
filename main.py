@@ -13,9 +13,15 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from config import ConfigError, load_cache_file, load_run_cron
+from config import (
+    ConfigError,
+    FailRetry,
+    load_cache_file,
+    load_fail_retry,
+    load_run_cron,
+)
 from cron import CronExpr, next_run
 from runner import pause_all
 from token_cache import TokenCache
@@ -88,11 +94,37 @@ def sleep_until(target: datetime, chunk: float = SLEEP_CHUNK) -> None:
         time.sleep(min(remaining, chunk))
 
 
-def run_forever(cron: CronExpr, cache: TokenCache | None) -> int:
-    """常驻运行：等到 cron 指定的时刻跑一轮，然后接着等下一次，直到 Ctrl+C。
+def should_notify_failure(failures: int, notify_every: int) -> bool:
+    """失败推送策略：第 1 次立刻推，之后每 ``notify_every`` 次推一次。
+
+    ``failures`` 是本次失败的序号（从 1 开始）。
+    """
+    if failures <= 1:
+        return True
+    return notify_every > 0 and failures % notify_every == 0
+
+
+def retry_target(
+    scheduled: datetime, retry: FailRetry, failures: int, now: datetime
+) -> datetime:
+    """失败后下一次该在什么时候跑。
+
+    取「下一个 cron 时刻」和「now + 重试间隔」里更早的那个——所以失败后会按
+    间隔重试，但**不会越过下一个 cron 时刻**（否则重试会一直往后堆）。
+    """
+    if failures <= 0 or retry.interval <= 0:
+        return scheduled
+    return min(scheduled, now + timedelta(seconds=retry.interval))
+
+
+def run_forever(
+    cron: CronExpr, cache: TokenCache | None, retry: FailRetry | None = None
+) -> int:
+    """常驻运行：等到 cron 指定的时刻跑一轮，失败则按间隔重试，直到 Ctrl+C。
 
     每行日志都带时间戳——这个进程会跑很久，翻日志时没有时间戳很难定位。
     """
+    retry = retry or FailRetry()
 
     def stamped(line: str) -> None:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {line}")
@@ -101,12 +133,22 @@ def run_forever(cron: CronExpr, cache: TokenCache | None) -> int:
     # 而只看「下次运行 01:00」是看不出问题的——那可能是 UTC 的 01:00。
     zone = datetime.now().astimezone().strftime("%Z%z") or "未知"
     print(f"⏰定时模式已开启（{cron.raw}，本机时区 {zone}），按 Ctrl+C 退出")
+    if retry.interval > 0:
+        print(
+            f"   失败后每 {format_duration(retry.interval)} 重试一次；"
+            f"第 1 次失败即时推送，之后每 {retry.notify_every} 次才推送一次"
+        )
 
+    failures = 0
     while True:
-        target = next_run(cron, datetime.now())
+        now = datetime.now()
+        scheduled = next_run(cron, now)
+        target = retry_target(scheduled, retry, failures, now)
+        label = "下次运行" if target == scheduled else "失败重试"
+
         stamped(
-            f"😴下次运行：{target:%Y-%m-%d %H:%M:%S}"
-            f"（{format_duration((target - datetime.now()).total_seconds())}后）"
+            f"😴{label}：{target:%Y-%m-%d %H:%M:%S}"
+            f"（{format_duration((target - now).total_seconds())}后）"
         )
 
         try:
@@ -115,11 +157,28 @@ def run_forever(cron: CronExpr, cache: TokenCache | None) -> int:
             print("\n👋已停止定时运行")
             return 0
 
+        attempt = failures + 1
+        notify_failure = should_notify_failure(attempt, retry.notify_every)
         stamped("⌛️开始运行")
+
         try:
-            pause_all(stamped, cache=cache)
+            result = pause_all(stamped, cache=cache, notify_failure=notify_failure)
         except Exception as exc:  # noqa: BLE001 - 常驻进程不该被一次意外弄死
             stamped(f"❌本次运行异常: {exc}")
+            result = None
+
+        if result is not None and result.ok:
+            if failures:
+                stamped(f"✔️重试成功（此前已失败 {failures} 次）")
+            failures = 0
+            continue
+
+        failures = attempt
+        if not notify_failure:
+            stamped(
+                f"⏳已连续失败 {failures} 次，本次不推送"
+                f"（每 {retry.notify_every} 次才推一次）"
+            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -130,13 +189,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         cron = load_run_cron()
+        retry = load_fail_retry()
     except ConfigError:
         # 定时配置读不出来时按「只跑一次」处理，让 pause_all 去统一报错并推送
-        cron = None
+        cron, retry = None, FailRetry()
 
     if cron is None:
         return run_once(cache)
-    return run_forever(cron, cache)
+    return run_forever(cron, cache, retry)
 
 
 if __name__ == "__main__":

@@ -196,6 +196,7 @@ def pause_all(
     log: Logger = print,
     environ: Mapping[str, str] | None = None,
     cache: TokenCache | None = None,
+    notify_failure: bool = True,
 ) -> Result:
     """逐个账户登录换取令牌并暂停加速。
 
@@ -205,12 +206,16 @@ def pause_all(
 
     单个账户失败不会中断其余账户——多账户场景下，一个密码输错不该让其他账户
     也漏掉当天的暂停。
+
+    ``notify_failure=False`` 时不推送失败结果（成功的照常推）。常驻模式下的
+    小时级重试用它来避免每次失败都刷屏。
     """
     try:
         cfg = load_config(environ=environ)
     except ConfigError as exc:
         log(f"❌错误: {exc}")
-        _notify_config_error(environ, exc, log)
+        if notify_failure:
+            _notify_config_error(environ, exc, log)
         return Result(False, "config", message=str(exc))
 
     client = Client(retries=cfg.retries)
@@ -240,5 +245,8 @@ def pause_all(
             False, first_failure.step, first_failure.code, first_failure.message, results
         )
 
-    _notify(cfg.notify, result, log, [account.pushplus_token for account in cfg.accounts])
+    if result.ok or notify_failure:
+        _notify(
+            cfg.notify, result, log, [account.pushplus_token for account in cfg.accounts]
+        )
     return result
