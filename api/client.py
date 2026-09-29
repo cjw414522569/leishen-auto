@@ -21,6 +21,9 @@ DEFAULT_RETRY_DELAY_MAX = 3.0  # 最大等待（秒），在这个区间内随�
 
 PAUSE_PATH = "/api/user/pause"
 LOGIN_PATH = "/api/auth/login/v1"
+# 密码登录 v1 已被 CloudWAF 拦死（HTTP 418）。短信登录是现在唯一能走的重登路径。
+SMS_CODE_PATH = "/tools/smscode"  # 注意：这个路径**没有** /api 前缀
+SMS_LOGIN_PATH = "/api/auth/login/code"
 
 # 页面上的接口常量：语言、默认渠道、网页端 os_type
 DEFAULT_LANG = "zh_CN"
@@ -40,8 +43,8 @@ DEFAULT_HEADERS = {
     ),
     "Accept": "*/*",
     "Accept-Language": "zh-CN,zh;q=0.9",
-    "Origin": "https://vip.leigod.com",
-    "Referer": "https://vip.leigod.com/",
+    "Origin": "https://www.leigod.com",
+    "Referer": "https://www.leigod.com/",
 }
 
 # 页面上的错误码（chunk-common.js -> c.HTTP_*）
@@ -50,10 +53,11 @@ CODE_TOKEN_EXPIRED = 400006  # 令牌过期，页面据此跳回登录
 CODE_ALREADY_PAUSED = 400803  # 账号已经停止加速，请不要重复操作
 
 # 「登录态失效」一族：命中任何一个都该丢弃缓存、重新登录。
-# 400006 是页面 JS 里定义的令牌过期；400007 是线上实际返回过的
-# 「当前登录态已过期，请重新登录」——服务端可以提前作废令牌，不等
-# expiry_time，所以过期时间只是提示，被拒了就得靠重新登录兜底。
-TOKEN_EXPIRED_CODES = frozenset({400006, 400007})
+# 这 6 个码来自官网前端（它统一按登出处理）以及线上实测：
+#   400006 令牌过期、400007 登录态已过期、400008 / 400816 / 400334 / 400027
+# 服务端可以提前作废令牌，不等 expiry_time，所以过期时间只是提示，
+# 被拒了就得靠重新登录兜底 —— 少认一个码，那一轮的暂停就会直接失败。
+TOKEN_EXPIRED_CODES = frozenset({400006, 400007, 400008, 400816, 400334, 400027})
 
 
 class APIError(Exception):
@@ -83,6 +87,12 @@ class HTTPResponse:
 
     status_code: int
     text: str
+
+
+def _as_country_code(value: str) -> Any:
+    """短信接口要的是数字类型的国家码（86），而配置里通常是字符串。"""
+    text = str(value).strip()
+    return int(text) if text.isdigit() else text
 
 
 def _decode(payload: bytes) -> str:
@@ -167,6 +177,24 @@ class LoginInfo:
     expiry_time: str = ""
 
 
+@dataclass
+class SmsCodeInfo:
+    """请求短信验证码的结果。"""
+
+    smscode_key: str
+    bind_status: int = 0  # 5 表示正常绑定
+    has_password: bool = False
+
+
+class SmsLoginError(APIError):
+    """短信登录相关的业务错误。"""
+
+    def __init__(self, code: int, msg: str) -> None:
+        super().__init__(f"{code} - {msg}")
+        self.code = code
+        self.msg = msg
+
+
 class HTTPSession(Protocol):
     """HTTP 会话接口，便于测试时注入假实现。"""
 
@@ -198,6 +226,71 @@ class Client:
         # 负数会让 time.sleep 抛 ValueError，这里兜住
         self.retry_delay = max(0.0, retry_delay)
         self.retry_delay_max = max(self.retry_delay, retry_delay_max)
+
+    def send_sms_code(
+        self,
+        phone: str,
+        country_code: str = DEFAULT_COUNTRY_CODE,
+        state: int = 4,
+    ) -> SmsCodeInfo:
+        """请求短信验证码 —— 会真的往该手机号发一条短信。
+
+        返回的 ``smscode_key`` 有效期约 30 分钟，要连同用户收到的验证码一起
+        传给 :meth:`login_with_sms`。
+        """
+        data = self._post(
+            SMS_CODE_PATH,
+            {"phone": phone, "country_code": _as_country_code(country_code), "state": state},
+        )
+
+        code = data.get("code", 0)
+        if code != 0:
+            raise SmsLoginError(code, data.get("msg", ""))
+
+        info = data.get("data") or {}
+        key = info.get("smscode_key", "")
+        if not key:
+            raise APIError("短信接口没有返回 smscode_key")
+        return SmsCodeInfo(
+            smscode_key=key,
+            bind_status=info.get("bind_status", 0),
+            has_password=bool(info.get("has_password", False)),
+        )
+
+    def login_with_sms(
+        self,
+        phone: str,
+        smscode_key: str,
+        smscode: str,
+        *,
+        country_code: str = DEFAULT_COUNTRY_CODE,
+    ) -> LoginInfo:
+        """用短信验证码登录，拿到 ``account_token``。"""
+        payload = {
+            "country_code": _as_country_code(country_code),
+            "mobile_num": phone,
+            "smscode_key": smscode_key,
+            "smscode": smscode,
+            "code": "",
+            "password": "",
+            "refer_code": "",
+        }
+
+        data = self._post(SMS_LOGIN_PATH, payload)
+
+        code = data.get("code", 0)
+        if code != 0:
+            raise SmsLoginError(code, data.get("msg", ""))
+
+        login_info = (data.get("data") or {}).get("login_info") or {}
+        account_token = login_info.get("account_token", "")
+        if not account_token:
+            raise APIError("登录响应缺少 account_token")
+
+        return LoginInfo(
+            account_token=account_token,
+            expiry_time=login_info.get("expiry_time", ""),
+        )
 
     def pause(self, account_token: str, lang: str) -> PauseResponse:
         """暂停加速器。"""

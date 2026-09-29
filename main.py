@@ -15,15 +15,18 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+from api import APIError
 from config import (
     ConfigError,
     FailRetry,
     load_cache_file,
+    load_config,
     load_fail_retry,
     load_run_cron,
 )
 from cron import CronExpr, next_run
 from runner import pause_all
+from sms_login import LoginFlowError, request_code, verify_code
 from token_cache import TokenCache
 
 # 长睡眠切成小段：这样系统时钟被改、机器休眠唤醒后，实际触发时刻仍跟着墙钟走，
@@ -60,6 +63,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="不使用本地令牌缓存，每次都重新登录（GitHub Actions 用这个）",
     )
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help="短信登录：往手机发验证码、在终端里输入，换到令牌并存进缓存",
+    )
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        help="启动本地网页做短信登录（默认只绑 127.0.0.1）",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="网页监听地址，默认仅本机")
+    parser.add_argument("--port", type=int, default=8765, help="网页监听端口，默认 8765")
     return parser.parse_args(argv)
 
 
@@ -74,6 +89,54 @@ def format_duration(seconds: float) -> str:
                 return f"{body} {rest // 60} 分钟"
             return body
     return f"{seconds} 秒"
+
+
+def interactive_login(cache: TokenCache | None = None, *, input_fn=input, log=print) -> int:
+    """命令行短信登录：发码 → 输入验证码 → 令牌入库。"""
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        log(f"❌错误: {exc}")
+        return 1
+
+    accounts = cfg.accounts
+    if len(accounts) == 1:
+        account = accounts[0]
+        log(f"📱短信登录：{account.label}")
+    else:
+        log("📱短信登录，请选择账户：")
+        for index, item in enumerate(accounts, 1):
+            log(f"   {index}) {item.label}")
+        try:
+            raw = input_fn(f"请选择 [1-{len(accounts)}]（回车默认 1）: ").strip() or "1"
+        except (EOFError, KeyboardInterrupt):
+            log("\n👋已取消")
+            return 1
+        if not raw.isdigit() or not 1 <= int(raw) <= len(accounts):
+            log("❌无效的选择")
+            return 1
+        account = accounts[int(raw) - 1]
+
+    cache = cache or TokenCache(load_cache_file() or None)
+
+    try:
+        info = request_code(cfg, account.phone, log=log)
+    except (LoginFlowError, APIError) as exc:
+        log(f"❌发送失败: {exc}")
+        return 1
+
+    try:
+        smscode = input_fn("请输入手机收到的验证码: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        log("\n👋已取消")
+        return 1
+
+    try:
+        verify_code(cfg, account.phone, info.smscode_key, smscode, cache=cache, log=log)
+    except (LoginFlowError, APIError) as exc:
+        log(f"❌登录失败: {exc}")
+        return 1
+    return 0
 
 
 def run_once(cache: TokenCache | None) -> int:
@@ -186,6 +249,13 @@ def main(argv: list[str] | None = None) -> int:
     force_utf8_output()
 
     cache = None if args.no_cache else TokenCache(load_cache_file() or None)
+
+    if args.web:
+        from webui import serve
+
+        return serve(args.host, args.port)
+    if args.login:
+        return interactive_login(cache)
 
     try:
         cron = load_run_cron()
