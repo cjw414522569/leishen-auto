@@ -220,6 +220,36 @@ def account_content(account: Any, now: datetime | None = None) -> str:
     return f"{stamp}\n\n{icon} {account.label}：{_describe(account)}"
 
 
+def build_login_link_message(
+    url: str,
+    accounts: list[Any] | None = None,
+    ttl_seconds: float = 0.0,
+    now: datetime | None = None,
+) -> Message:
+    """令牌失效时那条「点这里重新登录」的推送。
+
+    ``accounts`` 传的是需要重新登录的账户，只用来展示（手机号已打码）——
+    正文和标题里都不会出现完整号码。
+    """
+    stamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    lines = [stamp, "", "🔑雷神加速器的登录令牌已失效，需要重新登录。"]
+
+    labels = [account.label for account in (accounts or [])]
+    if labels:
+        lines.append("")
+        lines.append("涉及的账户：" + "、".join(labels))
+
+    lines += ["", "点开下面的地址，输入手机收到的验证码即可：", url]
+
+    if ttl_seconds > 0:
+        minutes = max(1, int(ttl_seconds // 60))
+        lines.append("")
+        lines.append(f"⏳这个地址只用一次，{minutes} 分钟内有效 —— 用过就作废。")
+
+    lines += ["", "（本消息由自动任务发送，无需回复）"]
+    return Message(token="", title="雷神加速器：需要重新登录", content="\n".join(lines))
+
+
 def build_messages(
     settings: NotifySettings,
     result: Any,

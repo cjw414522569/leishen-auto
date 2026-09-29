@@ -32,6 +32,10 @@ DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 DEFAULT_FAIL_RETRY_INTERVAL = 3600.0
 DEFAULT_FAIL_NOTIFY_EVERY = 5
 
+# 一次性短信登录地址的有效期（秒）。用过即失效，这个只是兜底的上限
+DEFAULT_LOGIN_LINK_TTL = 1800.0
+DEFAULT_WEB_PORT = 8765
+
 # 找到这些标记就认为到项目根了，不再往上找 .env
 PROJECT_MARKERS = (".git", "pyproject.toml", "setup.py")
 
@@ -159,6 +163,11 @@ class Config:
     # 整轮失败后的重试策略（仅本地/Docker 的常驻模式用）
     fail_retry_interval: float = DEFAULT_FAIL_RETRY_INTERVAL  # 秒；0 = 不重试
     fail_notify_every: int = DEFAULT_FAIL_NOTIFY_EVERY
+    # 短信登录网页（仅本地/Docker）：对外地址、监听地址、一次性地址的有效期
+    web_base_url: str = ""  # 推送里用的对外地址，如 https://leishen.example.com
+    web_host: str = ""  # 监听地址；服务器上要 0.0.0.0
+    web_port: int = 8765
+    login_link_ttl: float = DEFAULT_LOGIN_LINK_TTL  # 秒
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -314,6 +323,60 @@ def load_fail_retry(
 ) -> FailRetry:
     """只读整轮失败后的重试策略。"""
     return _fail_retry(_resolve_source(env_file, environ))
+
+
+@dataclass(frozen=True)
+class WebSettings:
+    """短信登录网页的配置（仅本地 / Docker 用）。"""
+
+    base_url: str = ""  # 对外地址；空表示「不推送登录链接」模式
+    host: str = ""
+    port: int = DEFAULT_WEB_PORT
+    link_ttl: float = DEFAULT_LOGIN_LINK_TTL  # 秒
+
+    @property
+    def public(self) -> bool:
+        """是否对外提供服务（推送登录链接的前提）。"""
+        return bool(self.base_url)
+
+    @property
+    def bind(self) -> str:
+        """实际监听地址：配了对外地址就默认全绑，否则只在回环上。"""
+        return self.host or ("0.0.0.0" if self.public else "127.0.0.1")
+
+
+def _web_settings(source: Mapping[str, str]) -> WebSettings:
+    raw_port = _get(source, "WEB_PORT")
+    if raw_port == "":
+        port = DEFAULT_WEB_PORT
+    else:
+        try:
+            port = int(raw_port)
+        except ValueError as exc:
+            raise ConfigError(f"WEB_PORT 必须是整数，当前为 {raw_port!r}") from exc
+        if not 1 <= port <= 65535:
+            raise ConfigError(f"WEB_PORT 超出范围：{port}")
+
+    base_url = _get(source, "WEB_BASE_URL").rstrip("/")
+    host = _get(source, "WEB_HOST")
+
+    if base_url and not base_url.startswith(("http://", "https://")):
+        raise ConfigError("WEB_BASE_URL 要以 http:// 或 https:// 开头")
+
+    return WebSettings(
+        base_url=base_url,
+        host=host,
+        port=port,
+        link_ttl=parse_duration(_get(source, "LOGIN_LINK_TTL")) or DEFAULT_LOGIN_LINK_TTL,
+    )
+
+
+def load_web_settings(
+    env_file: str | PathLike[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> WebSettings:
+    """只读短信登录网页的配置。"""
+    return _web_settings(_resolve_source(env_file, environ))
 
 
 def load_cache_file(

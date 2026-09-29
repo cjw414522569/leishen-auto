@@ -5,9 +5,10 @@
 
 安全设计（都不是可选项）：
 
-1. **URL 带随机令牌**。页面只在 ``/<随机串>/`` 下提供，其余路径一律 404。
-   令牌每次启动重新生成、只打印在控制台 —— 扫端口的人拿到的是 404，
-   而不是一个「给任意号码发短信」的入口。
+1. **URL 带随机令牌，且用过即失效**。页面只在 ``/<随机串>/`` 下提供，其余路径
+   一律 404。令牌每次启动重新生成 —— 扫端口的人拿到的是 404，而不是一个
+   「给任意号码发短信」的入口。短信登录成功后令牌立刻作废，所以推送到微信的那条
+   消息即使被别人看到，也已经没用了；另有 TTL 兜底（默认 30 分钟）。
 2. **默认只绑 127.0.0.1**。绑 0.0.0.0 意味着同网段任何人都能打开这个页面、
    用你的账号登录并拿走令牌。要用 ``--host`` 显式指定才会放开，届时会打印警告。
 3. **只允许给配置里的号码发验证码** —— 否则这就成了一个能给任意号码发短信的接口。
@@ -29,6 +30,7 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 from typing import Any, Mapping
 
 from api import APIError, SmsLoginError
@@ -48,12 +50,57 @@ MAX_LISTED_ACCOUNTS = 50
 
 
 class _State:
-    """服务端持有的状态：待校验的 smscode_key 与发送冷却。"""
+    """服务端持有的状态：一次性令牌、待校验的 smscode_key、发送冷却。
 
-    def __init__(self) -> None:
+    令牌做成**用过即失效**：短信登录成功后立刻清空，之后任何请求都只得到 404。
+    这样即使推送的消息被别人看到，也已经没有用了。另有 TTL 作兜底上限。
+    """
+
+    def __init__(self, token: str = "", ttl: float = 0.0) -> None:
         self.lock = threading.Lock()
+        self.token = token
+        self.expires_at = (time.monotonic() + ttl) if ttl > 0 else None
+        self.used = False
         self.pending: dict[str, str] = {}  # phone -> smscode_key
         self.last_sent: dict[str, float] = {}  # phone -> 单调时钟
+
+    def token_ok(self, candidate: str) -> bool:
+        with self.lock:
+            if self.used or not self.token or candidate != self.token:
+                return False
+            if self.expires_at is not None and time.monotonic() > self.expires_at:
+                return False
+            return True
+
+    @property
+    def active(self) -> bool:
+        """当前令牌是否还能用（未用过、未超时、且确实有令牌）。"""
+        with self.lock:
+            if self.used or not self.token:
+                return False
+            if self.expires_at is not None and time.monotonic() > self.expires_at:
+                return False
+            return True
+
+    def rotate(self, ttl: float = 0.0) -> str:
+        """换一个新的一次性令牌并重新计时。
+
+        常驻进程里端口是固定的，不能每次都新建服务（会端口冲突），
+        所以改成「一个服务、令牌轮换」。
+        """
+        with self.lock:
+            self.token = secrets.token_urlsafe(TOKEN_BYTES)
+            self.expires_at = (time.monotonic() + ttl) if ttl > 0 else None
+            self.used = False
+            self.pending.clear()
+            self.last_sent.clear()
+            return self.token
+
+    def consume(self) -> None:
+        """用过即失效。"""
+        with self.lock:
+            self.used = True
+            self.pending.clear()
 
     def cooldown_left(self, phone: str) -> int:
         with self.lock:
@@ -80,9 +127,13 @@ class _State:
 class _Handler(BaseHTTPRequestHandler):
     server_version = "leishen-auto"
     state: _State  # 由 create_server() 注入
-    token = ""  # URL 令牌，由 create_server() 注入
     allowed_hosts: frozenset = LOOPBACK_HOSTS
     allowed_origins: frozenset = frozenset()
+    # 登录成功后的回调，返回一句给用户看的话（通常是暂停结果）
+    on_login_success: Any = None
+    # 令牌缓存。必须和调用方用的是同一个 —— 否则令牌会写进另一个文件，
+    # 定时任务读不到，白登录一场。
+    cache: Any = None
     logger = print
 
     # ---------- 基础设施 ----------
@@ -147,10 +198,10 @@ class _Handler(BaseHTTPRequestHandler):
         return content_type == "application/json"
 
     def _token_ok(self) -> bool:
-        """路径第一段必须等于本次启动的随机令牌。"""
+        """路径第一段必须等于本次的随机令牌，且尚未被用过、未超时。"""
         parts = self.path.split("?", 1)[0].split("/")
         # "/<token>/..." -> ['', '<token>', ...]
-        return len(parts) > 1 and parts[1] == self.token
+        return len(parts) > 1 and self.state.token_ok(parts[1])
 
     def _route(self) -> str:
         """去掉令牌前缀后的路径：``/<token>/api/state`` -> ``/api/state``。"""
@@ -271,7 +322,7 @@ class _Handler(BaseHTTPRequestHandler):
                 phone,
                 key,
                 smscode,
-                cache=TokenCache(load_cache_file() or None),
+                cache=self.cache or TokenCache(load_cache_file() or None),
                 log=self.logger,
             )
         except LoginFlowError as exc:
@@ -285,9 +336,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         self.state.forget(phone)
+        # 地址用完即失效 —— 即使推送消息被别人看到，也已经没用了
+        self.state.consume()
+
+        # 登录成功就顺手把暂停做了，不用等下一次重试
+        extra = ""
+        if self.on_login_success is not None:
+            try:
+                extra = self.on_login_success() or ""
+            except Exception as exc:  # noqa: BLE001 - 别让暂停的意外吞掉登录结果
+                self.logger(f"[web] 登录后执行暂停时异常: {exc}")
+                extra = f"（但接着执行暂停时出错：{exc}）"
+
         self._json(
             200,
-            {"ok": True, "message": "登录成功，令牌已保存", "expiry_time": info.expiry_time},
+            {
+                "ok": True,
+                "message": "登录成功，令牌已保存" + (f"\n{extra}" if extra else ""),
+                "expiry_time": info.expiry_time,
+            },
         )
 
 
@@ -296,51 +363,116 @@ def create_server(
     port: int = DEFAULT_PORT,
     log=print,
     token: str | None = None,
+    *,
+    ttl: float = 0.0,
+    base_url: str = "",
+    on_login_success: Any = None,
+    cache: Any = None,
 ) -> ThreadingHTTPServer:
     """建好服务但不启动 —— 便于测试传 port=0 拿随机端口、传固定令牌。
 
-    令牌默认每次启动随机生成；只有能读到控制台输出的人才知道完整地址。
+    令牌默认每次启动随机生成；只有能读到控制台输出的人（或收到推送的人）
+    才知道完整地址。``ttl`` 是一把兜底上限，另有一道「用过即失效」。
+
+    ``base_url`` 是对外地址（如 ``https://lei.example.com``）。它有两个作用：
+    拼出推送里那个链接，以及把它的主机名放进 Host 白名单 —— 否则从公网访问
+    会被 Host 校验拦掉。
     """
-    auth_token = token or secrets.token_urlsafe(TOKEN_BYTES)
+    auth_token = secrets.token_urlsafe(TOKEN_BYTES) if token is None else token
 
     allowed_hosts = set(LOOPBACK_HOSTS)
     if host not in ("0.0.0.0", "::", ""):
         allowed_hosts.add(host)
+    if base_url:
+        # 对外域名/IP 也得放行，不然公网访问一律被 Host 校验拒掉
+        parsed = urlsplit(base_url)
+        if parsed.hostname:
+            allowed_hosts.add(parsed.hostname.lower())
+
+    state = _State(auth_token, ttl)
 
     handler = type(
         "Handler",
         (_Handler,),
         {
-            "state": _State(),
+            "state": state,
             "logger": log,
-            "token": auth_token,
             "allowed_hosts": frozenset(allowed_hosts),
+            # 必须包一层 staticmethod：普通函数放在类属性上会被当成方法，
+            # 通过实例访问时 Python 会自动补一个 self，调用就崩了
+            "on_login_success": staticmethod(on_login_success)
+            if on_login_success is not None
+            else None,
+            "cache": cache,
         },
     )
     httpd = ThreadingHTTPServer((host, port), handler)
     # 绑定之后才知道真实端口（port=0 时由系统分配），
     # 所以同源白名单在这里补算 —— 否则空 Origin 能过、带 Origin 的一律被拒。
     real_port = httpd.server_address[1]
-    httpd.RequestHandlerClass.allowed_origins = frozenset(
-        f"http://{name}:{real_port}" for name in allowed_hosts
-    )
-    # 暴露给调用方：serve() 用来打印地址，测试用来拼 URL
+    origins = {f"http://{name}:{real_port}" for name in allowed_hosts}
+    if base_url:
+        origins.add(base_url.rstrip("/"))
+    httpd.RequestHandlerClass.allowed_origins = frozenset(origins)
+
+    # 暴露给调用方：serve() 用来打印地址，测试用来拼 URL / 验一次性
     httpd.auth_token = auth_token
+    httpd.state = state
     return httpd
 
 
-def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, log=print) -> int:
-    """启动本地网页服务；按 Ctrl+C 退出。"""
-    httpd = create_server(host, port, log)
+def login_url(httpd: ThreadingHTTPServer, base_url: str = "") -> str:
+    """拼出可以发给别人的完整登录地址（用当前令牌）。"""
+    token = httpd.state.token
+    if base_url:
+        return f"{base_url.rstrip('/')}/{token}/"
+    host = httpd.server_address[0]
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    return f"http://{shown}:{httpd.server_address[1]}/{token}/"
 
-    shown = "127.0.0.1" if host in ("127.0.0.1", "localhost") else host
-    port = httpd.server_address[1]
-    log(f"🌐短信登录页面：http://{shown}:{port}/{httpd.auth_token}/")
+
+def start_in_background(
+    httpd: ThreadingHTTPServer, log=print
+) -> threading.Thread:
+    """在后台线程里跑服务 —— 常驻模式需要它和定时循环并存。"""
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    log("🌐短信登录服务已在后台启动（令牌为空，收到推送前不接受任何请求）")
+    return thread
+
+
+def serve(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    log=print,
+    *,
+    ttl: float = 0.0,
+    base_url: str = "",
+    on_login_success: Any = None,
+    cache: Any = None,
+) -> int:
+    """启动短信登录网页；按 Ctrl+C 退出。"""
+    httpd = create_server(
+        host,
+        port,
+        log,
+        ttl=ttl,
+        base_url=base_url,
+        on_login_success=on_login_success,
+        cache=cache,
+    )
+
+    log(f"🌐短信登录页面：{login_url(httpd, base_url)}")
     log("   地址里的随机串是本次启动生成的：别发给别人、也别截图外传")
-    log("   只有这一个地址能打开页面，其它路径一律 404")
+    log("   只有这一个地址能打开页面，其它路径一律 404；登录用过一次就失效")
+    if ttl > 0:
+        log(f"   未使用的话 {int(ttl)} 秒后也会失效")
     if host not in ("127.0.0.1", "localhost"):
-        log("⚠️注意：服务绑在非本机地址上，同网段的任何人都能打开这个页面、")
-        log("   用你的账号登录并拿走令牌。仅在你清楚风险时才这么用。")
+        log(f"⚠️服务绑在 {host} 上，能从外部访问：")
+        log("   地址本身就是凭据，拿到它的人能用你的账号登录")
+        if base_url.startswith("http://"):
+            log("   ⚠️而且是明文 HTTP —— 验证码和令牌会以明文经过网络。")
+            log("   建议在前面挂一层 HTTPS 反向代理，再把 WEB_BASE_URL 改成 https://")
     log("   按 Ctrl+C 退出")
 
     try:
