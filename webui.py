@@ -3,18 +3,29 @@
 密码登录接口被 CloudWAF 封停后，这是重新拿到令牌的入口。用标准库
 ``http.server`` 实现，仍然零第三方依赖。
 
-安全约束（都不是可选项）：
+安全设计（都不是可选项）：
 
-1. **默认只绑 127.0.0.1**。绑 0.0.0.0 意味着同网段任何人都能打开这个页面、
+1. **URL 带随机令牌**。页面只在 ``/<随机串>/`` 下提供，其余路径一律 404。
+   令牌每次启动重新生成、只打印在控制台 —— 扫端口的人拿到的是 404，
+   而不是一个「给任意号码发短信」的入口。
+2. **默认只绑 127.0.0.1**。绑 0.0.0.0 意味着同网段任何人都能打开这个页面、
    用你的账号登录并拿走令牌。要用 ``--host`` 显式指定才会放开，届时会打印警告。
-2. **只允许给配置里的号码发验证码** —— 否则这就成了一个能给任意号码发短信的接口。
-3. 每个号码 60 秒内只能发一次，避免误点刷短信。
-4. 不提供任何文件读取，只吐一个固定的页面。
+3. **只允许给配置里的号码发验证码** —— 否则这就成了一个能给任意号码发短信的接口。
+4. **校验 Host 与 Origin**：Host 必须是本机回环名（防 DNS rebinding），
+   带了 Origin 就必须同源（防你浏览器里的恶意网页跨站打过来）。
+5. **POST 必须声明 application/json**：堵掉用 ``text/plain`` 绕过 CORS 预检的
+   简单请求（那种请求浏览器不发预检，能直接打进来）。
+6. 每个号码 60 秒内只能发一次，避免误点刷短信。
+7. 不提供任何文件读取，只吐一个固定的页面。
+
+注意 **127.0.0.1 本身已经挡住了远程扫描** —— 上面第 1、4、5 条防的是另外两类：
+你浏览器里的恶意网页，以及本机上的其他进程。
 """
 
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +39,10 @@ from token_cache import TokenCache
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 SEND_COOLDOWN_SECONDS = 60
+# URL 令牌的字节数；token_urlsafe(16) 得到 22 个 URL 安全字符
+TOKEN_BYTES = 16
+# Host 头必须落在这些名字里，否则拒绝（防 DNS rebinding）
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 # 表单里最多展示多少个账户（配置里账户很多时不至于把页面撑爆）
 MAX_LISTED_ACCOUNTS = 50
 
@@ -64,7 +79,10 @@ class _State:
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "leishen-auto"
-    state: _State  # 由 serve() 注入
+    state: _State  # 由 create_server() 注入
+    token = ""  # URL 令牌，由 create_server() 注入
+    allowed_hosts: frozenset = LOOPBACK_HOSTS
+    allowed_origins: frozenset = frozenset()
     logger = print
 
     # ---------- 基础设施 ----------
@@ -104,27 +122,79 @@ class _Handler(BaseHTTPRequestHandler):
         """每次都重新读配置 —— 改了 .env 刷新页面就能生效。"""
         return load_config()
 
+    # ---------- 安全校验 ----------
+
+    def _request_ok(self) -> bool:
+        """Host 与 Origin 校验。这两个头浏览器会强制带上，脚本伪造不了。"""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
+        if host and host not in self.allowed_hosts:
+            # DNS rebinding：攻击者的域名解析到 127.0.0.1，Host 头就是他的域名
+            return False
+
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin and origin not in self.allowed_origins:
+            # 你浏览器里的恶意网页跨站打过来时会带 Origin
+            return False
+        return True
+
+    def _json_content_type(self) -> bool:
+        """POST 必须声明 application/json。
+
+        ``text/plain`` 属于 CORS 简单请求，浏览器不发预检就能打过来 ——
+        所以不能只靠「浏览器不会让我发跨站 JSON」这一点。
+        """
+        content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        return content_type == "application/json"
+
+    def _token_ok(self) -> bool:
+        """路径第一段必须等于本次启动的随机令牌。"""
+        parts = self.path.split("?", 1)[0].split("/")
+        # "/<token>/..." -> ['', '<token>', ...]
+        return len(parts) > 1 and parts[1] == self.token
+
+    def _route(self) -> str:
+        """去掉令牌前缀后的路径：``/<token>/api/state`` -> ``/api/state``。"""
+        parts = self.path.split("?", 1)[0].split("/")
+        return "/" + "/".join(parts[2:])
+
     # ---------- 路由 ----------
 
+    def _reject(self) -> None:
+        """统一用 404 回绝 —— 不给探测者任何「这里有个服务」的信号。"""
+        self._json(404, {"ok": False, "message": "没有这个路径"})
+
+    def _guard(self) -> bool:
+        if not self._request_ok() or not self._token_ok():
+            self._reject()
+            return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
+        if not self._guard():
+            return
+        path = self._route()
         if path in ("/", "/index.html"):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
             return
         if path == "/api/state":
             self._state()
             return
-        self._json(404, {"ok": False, "message": "没有这个路径"})
+        self._reject()
 
     def do_POST(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
+        if not self._guard():
+            return
+        if not self._json_content_type():
+            self._reject()
+            return
+        path = self._route()
         if path == "/api/sms/send":
             self._send_code()
             return
         if path == "/api/sms/verify":
             self._verify_code()
             return
-        self._json(404, {"ok": False, "message": "没有这个路径"})
+        self._reject()
 
     # ---------- 处理 ----------
 
@@ -222,11 +292,41 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def create_server(
-    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, log=print
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    log=print,
+    token: str | None = None,
 ) -> ThreadingHTTPServer:
-    """建好服务但不启动 —— 便于测试传 port=0 拿随机端口。"""
-    handler = type("Handler", (_Handler,), {"state": _State(), "logger": log})
-    return ThreadingHTTPServer((host, port), handler)
+    """建好服务但不启动 —— 便于测试传 port=0 拿随机端口、传固定令牌。
+
+    令牌默认每次启动随机生成；只有能读到控制台输出的人才知道完整地址。
+    """
+    auth_token = token or secrets.token_urlsafe(TOKEN_BYTES)
+
+    allowed_hosts = set(LOOPBACK_HOSTS)
+    if host not in ("0.0.0.0", "::", ""):
+        allowed_hosts.add(host)
+
+    handler = type(
+        "Handler",
+        (_Handler,),
+        {
+            "state": _State(),
+            "logger": log,
+            "token": auth_token,
+            "allowed_hosts": frozenset(allowed_hosts),
+        },
+    )
+    httpd = ThreadingHTTPServer((host, port), handler)
+    # 绑定之后才知道真实端口（port=0 时由系统分配），
+    # 所以同源白名单在这里补算 —— 否则空 Origin 能过、带 Origin 的一律被拒。
+    real_port = httpd.server_address[1]
+    httpd.RequestHandlerClass.allowed_origins = frozenset(
+        f"http://{name}:{real_port}" for name in allowed_hosts
+    )
+    # 暴露给调用方：serve() 用来打印地址，测试用来拼 URL
+    httpd.auth_token = auth_token
+    return httpd
 
 
 def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, log=print) -> int:
@@ -234,7 +334,10 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, log=print) -> int:
     httpd = create_server(host, port, log)
 
     shown = "127.0.0.1" if host in ("127.0.0.1", "localhost") else host
-    log(f"🌐短信登录页面：http://{shown}:{httpd.server_address[1]}")
+    port = httpd.server_address[1]
+    log(f"🌐短信登录页面：http://{shown}:{port}/{httpd.auth_token}/")
+    log("   地址里的随机串是本次启动生成的：别发给别人、也别截图外传")
+    log("   只有这一个地址能打开页面，其它路径一律 404")
     if host not in ("127.0.0.1", "localhost"):
         log("⚠️注意：服务绑在非本机地址上，同网段的任何人都能打开这个页面、")
         log("   用你的账号登录并拿走令牌。仅在你清楚风险时才这么用。")
@@ -249,7 +352,7 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, log=print) -> int:
     return 0
 
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -309,7 +412,6 @@ PAGE = """<!doctype html>
 <body>
 <main class="card">
   <h1>雷神加速器 · 短信登录</h1>
-  <p class="sub">密码登录接口已被官方 WAF 封停，这里用短信验证码换取令牌。</p>
 
   <label for="phone">账户</label>
   <div class="row">
@@ -339,13 +441,17 @@ PAGE = """<!doctype html>
       loginBtn = $("login"), msgEl = $("msg");
   var cooldownTimer = null;
 
+  // 页面挂在 /<随机令牌>/ 下，所以接口地址必须从当前路径推导，
+  // 不能写成 "/api/..." 那种绝对路径（那会绕过令牌前缀）
+  var BASE = location.pathname.replace(/\/+$/, "") + "/";
+
   function say(text, kind) {
     msgEl.textContent = text || "";
     msgEl.className = kind || "";
   }
 
   function post(path, payload) {
-    return fetch(path, {
+    return fetch(BASE + path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -413,7 +519,7 @@ PAGE = """<!doctype html>
     if (e.key === "Enter") { loginBtn.click(); }
   });
 
-  fetch("/api/state").then(function (r) { return r.json(); }).then(function (res) {
+  fetch(BASE + "api/state").then(function (r) { return r.json(); }).then(function (res) {
     if (res.config_error) {
       phoneEl.innerHTML = '<option value="">（配置有问题）</option>';
       say("配置读不出来：" + res.config_error, "err");
