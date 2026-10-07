@@ -640,7 +640,8 @@ PAGE = r"""<!doctype html>
   }
 
   function post(path, payload) {
-    return fetch(BASE + path, {
+    // path 不要带前导斜杠：BASE 以 / 结尾，再带就会拼出 "//api/..."（404）
+    return fetch(BASE + path.replace(/^\/+/, ""), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -675,7 +676,7 @@ PAGE = r"""<!doctype html>
     if (!/^\d{6,20}$/.test(phone)) { say("请填写正确的手机号（6-20 位数字）", "err"); return; }
     say("正在发送…");
     sendBtn.disabled = true;
-    post("/api/sms/send", { phone: phone }).then(function (res) {
+    post("api/sms/send", { phone: phone }).then(function (res) {
       if (!res.ok) {
         say(res.message, "err");
         sendBtn.disabled = false;
@@ -696,7 +697,7 @@ PAGE = r"""<!doctype html>
     if (!smscode) { say("请填写收到的验证码", "err"); codeEl.focus(); return; }
     say("正在登录…");
     loginBtn.disabled = true;
-    post("/api/sms/verify", { phone: phone, smscode: smscode }).then(function (res) {
+    post("api/sms/verify", { phone: phone, smscode: smscode }).then(function (res) {
       loginBtn.disabled = false;
       if (!res.ok) { say(res.message, "err"); return; }
       say(res.message + (res.expiry_time ? "\n有效期至 " + res.expiry_time : ""), "ok");
