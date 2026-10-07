@@ -8,7 +8,7 @@
 1. **URL 带随机令牌，且用过即失效**。页面只在 ``/<随机串>/`` 下提供，其余路径
    一律 404。令牌每次启动重新生成 —— 扫端口的人拿到的是 404，而不是一个
    「给任意号码发短信」的入口。短信登录成功后令牌立刻作废，所以推送到微信的那条
-   消息即使被别人看到，也已经没用了；另有 TTL 兜底（默认 30 分钟）。
+   消息即使被别人看到，也已经没用了。**令牌没有时间限制，只因被使用而过期。**
 2. **默认只绑 127.0.0.1**。绑 0.0.0.0 意味着同网段任何人都能打开这个页面、
    用你的账号登录并拿走令牌。要用 ``--host`` 显式指定才会放开，届时会打印警告。
 3. **只允许给配置里的号码发验证码** —— 否则这就成了一个能给任意号码发短信的接口。
@@ -34,13 +34,22 @@ from urllib.parse import urlsplit
 from typing import Any, Mapping
 
 from api import APIError, SmsLoginError
-from config import ConfigError, load_cache_file, load_config
+from config import (
+    PHONE_RE,
+    ConfigError,
+    add_account_phone,
+    load_cache_file,
+    load_config,
+    mask_phone,
+)
 from sms_login import LoginFlowError, request_code, verify_code
 from token_cache import TokenCache
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 SEND_COOLDOWN_SECONDS = 60
+# 一小时内最多发多少条验证码。号码不再要求事先配置，加这道总量上限兜底
+SEND_HOURLY_LIMIT = 10
 # URL 令牌的字节数；token_urlsafe(16) 得到 22 个 URL 安全字符
 TOKEN_BYTES = 16
 # Host 头必须落在这些名字里，否则拒绝（防 DNS rebinding）
@@ -56,41 +65,33 @@ class _State:
     这样即使推送的消息被别人看到，也已经没有用了。另有 TTL 作兜底上限。
     """
 
-    def __init__(self, token: str = "", ttl: float = 0.0) -> None:
+    def __init__(self, token: str = "") -> None:
         self.lock = threading.Lock()
         self.token = token
-        self.expires_at = (time.monotonic() + ttl) if ttl > 0 else None
         self.used = False
         self.pending: dict[str, str] = {}  # phone -> smscode_key
         self.last_sent: dict[str, float] = {}  # phone -> 单调时钟
+        self.send_times: list[float] = []  # 全局发送时刻，用于总量上限
 
     def token_ok(self, candidate: str) -> bool:
+        """令牌**只因被使用而过期**，不设时间上限。"""
         with self.lock:
-            if self.used or not self.token or candidate != self.token:
-                return False
-            if self.expires_at is not None and time.monotonic() > self.expires_at:
-                return False
-            return True
+            return not self.used and bool(self.token) and candidate == self.token
 
     @property
     def active(self) -> bool:
-        """当前令牌是否还能用（未用过、未超时、且确实有令牌）。"""
+        """当前令牌是否还能用（未用过、且确实有令牌）。"""
         with self.lock:
-            if self.used or not self.token:
-                return False
-            if self.expires_at is not None and time.monotonic() > self.expires_at:
-                return False
-            return True
+            return not self.used and bool(self.token)
 
-    def rotate(self, ttl: float = 0.0) -> str:
-        """换一个新的一次性令牌并重新计时。
+    def rotate(self) -> str:
+        """换一个新的一次性令牌。
 
         常驻进程里端口是固定的，不能每次都新建服务（会端口冲突），
         所以改成「一个服务、令牌轮换」。
         """
         with self.lock:
             self.token = secrets.token_urlsafe(TOKEN_BYTES)
-            self.expires_at = (time.monotonic() + ttl) if ttl > 0 else None
             self.used = False
             self.pending.clear()
             self.last_sent.clear()
@@ -101,6 +102,26 @@ class _State:
         with self.lock:
             self.used = True
             self.pending.clear()
+
+    def allow_send(self, phone: str) -> str:
+        """能否发验证码。返回空串表示可以，否则是给用户看的原因。
+
+        两道限制：
+        - 单号 60 秒冷却 —— 挡误点
+        - 全局每小时上限 —— 号码不再要求事先配置，万一被刷也不至于烧短信费
+        """
+        now = time.monotonic()
+        with self.lock:
+            sent_at = self.last_sent.get(phone)
+            if sent_at is not None:
+                left = SEND_COOLDOWN_SECONDS - (now - sent_at)
+                if left > 0:
+                    return f"请等 {int(left) + 1} 秒后再试"
+
+            self.send_times = [t for t in self.send_times if now - t < 3600]
+            if len(self.send_times) >= SEND_HOURLY_LIMIT:
+                return f"一小时内最多发 {SEND_HOURLY_LIMIT} 条，请稍后再试"
+        return ""
 
     def cooldown_left(self, phone: str) -> int:
         with self.lock:
@@ -113,7 +134,9 @@ class _State:
     def remember_send(self, phone: str, key: str) -> None:
         with self.lock:
             self.pending[phone] = key
-            self.last_sent[phone] = time.monotonic()
+            now = time.monotonic()
+            self.last_sent[phone] = now
+            self.send_times.append(now)
 
     def take_key(self, phone: str) -> str:
         with self.lock:
@@ -134,6 +157,7 @@ class _Handler(BaseHTTPRequestHandler):
     # 令牌缓存。必须和调用方用的是同一个 —— 否则令牌会写进另一个文件，
     # 定时任务读不到，白登录一场。
     cache: Any = None
+    env_file: Any = None
     logger = print
 
     # ---------- 基础设施 ----------
@@ -172,6 +196,16 @@ class _Handler(BaseHTTPRequestHandler):
     def _config(self):
         """每次都重新读配置 —— 改了 .env 刷新页面就能生效。"""
         return load_config()
+
+    def _cfg_or_none(self):
+        """读配置；读不出来返回 None。
+
+        没配账户不该让页面瘫掉 —— 直接在页面上输号码是允许的。
+        """
+        try:
+            return self._config()
+        except ConfigError:
+            return None
 
     # ---------- 安全校验 ----------
 
@@ -250,33 +284,37 @@ class _Handler(BaseHTTPRequestHandler):
     # ---------- 处理 ----------
 
     def _state(self) -> None:
-        try:
-            cfg = self._config()
-        except ConfigError as exc:
-            self._json(200, {"ok": True, "accounts": [], "config_error": str(exc)})
-            return
+        """账户列表。**没有配置也是正常的** —— 可以在页面上直接输手机号。"""
+        cfg = self._cfg_or_none()
         accounts = [
-            {"phone": a.phone, "label": a.label} for a in cfg.accounts[:MAX_LISTED_ACCOUNTS]
+            {"phone": a.phone, "label": a.label}
+            for a in (cfg.accounts if cfg else [])[:MAX_LISTED_ACCOUNTS]
         ]
-        self._json(200, {"ok": True, "accounts": accounts, "config_error": None})
+        self._json(
+            200,
+            {
+                "ok": True,
+                "accounts": accounts,
+                # 配置读不出来不算错，只是没有可选项，用户手输即可
+                "config_error": None if cfg else "（还没配置账户，直接输入手机号即可）",
+            },
+        )
 
     def _send_code(self) -> None:
         body = self._body()
         phone = str(body.get("phone") or "").strip()
 
-        try:
-            cfg = self._config()
-        except ConfigError as exc:
-            self._json(400, {"ok": False, "message": str(exc)})
+        if not PHONE_RE.match(phone):
+            self._json(400, {"ok": False, "message": "手机号格式不正确（应为 6-20 位数字）"})
             return
 
-        left = self.state.cooldown_left(phone)
-        if left:
-            self._json(429, {"ok": False, "message": f"请等 {left} 秒后再试"})
+        reason = self.state.allow_send(phone)
+        if reason:
+            self._json(429, {"ok": False, "message": reason})
             return
 
         try:
-            info = request_code(cfg, phone, log=self.logger)
+            info = request_code(self._cfg_or_none(), phone, log=self.logger)
         except LoginFlowError as exc:
             self._json(400, {"ok": False, "message": str(exc)})
             return
@@ -304,12 +342,6 @@ class _Handler(BaseHTTPRequestHandler):
         phone = str(body.get("phone") or "").strip()
         smscode = str(body.get("smscode") or "").strip()
 
-        try:
-            cfg = self._config()
-        except ConfigError as exc:
-            self._json(400, {"ok": False, "message": str(exc)})
-            return
-
         key = self.state.take_key(phone)
         if not key:
             self._json(400, {"ok": False, "message": "请先发送验证码"})
@@ -318,7 +350,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             # key 从服务端取，不信客户端传来的 —— 减少可篡改的面
             info = verify_code(
-                cfg,
+                self._cfg_or_none(),
                 phone,
                 key,
                 smscode,
@@ -339,23 +371,45 @@ class _Handler(BaseHTTPRequestHandler):
         # 地址用完即失效 —— 即使推送消息被别人看到，也已经没用了
         self.state.consume()
 
+        notes = []
+
+        # 新号码就存进配置，下次打开页面就能直接选
+        saved = self._remember_phone(phone)
+        if saved:
+            notes.append(saved)
+
         # 登录成功就顺手把暂停做了，不用等下一次重试
-        extra = ""
         if self.on_login_success is not None:
             try:
                 extra = self.on_login_success() or ""
             except Exception as exc:  # noqa: BLE001 - 别让暂停的意外吞掉登录结果
                 self.logger(f"[web] 登录后执行暂停时异常: {exc}")
                 extra = f"（但接着执行暂停时出错：{exc}）"
+            if extra:
+                notes.append(extra)
+
+        message = "登录成功，令牌已保存"
+        if notes:
+            message += "\n" + "\n".join(notes)
 
         self._json(
             200,
-            {
-                "ok": True,
-                "message": "登录成功，令牌已保存" + (f"\n{extra}" if extra else ""),
-                "expiry_time": info.expiry_time,
-            },
+            {"ok": True, "message": message, "expiry_time": info.expiry_time},
         )
+
+    def _remember_phone(self, phone: str) -> str:
+        """把号码写进配置；已在配置里或写失败时返回一句说明（可空）。"""
+        if self.env_file is False:  # 显式关掉保存（测试用）
+            return ""
+        try:
+            path, key, added = add_account_phone(phone, self.env_file)
+        except ConfigError as exc:
+            self.logger(f"[web] 保存手机号失败: {exc}")
+            return f"（手机号没能存进配置：{exc}）"
+        if added:
+            self.logger(f"[web] 已把新号码写入 {path}（{key}）")
+            return f"📝已把 {mask_phone(phone)} 存进配置（{key}），下次可直接选"
+        return ""
 
 
 def create_server(
@@ -364,15 +418,15 @@ def create_server(
     log=print,
     token: str | None = None,
     *,
-    ttl: float = 0.0,
     base_url: str = "",
     on_login_success: Any = None,
     cache: Any = None,
+    env_file: Any = None,
 ) -> ThreadingHTTPServer:
     """建好服务但不启动 —— 便于测试传 port=0 拿随机端口、传固定令牌。
 
     令牌默认每次启动随机生成；只有能读到控制台输出的人（或收到推送的人）
-    才知道完整地址。``ttl`` 是一把兜底上限，另有一道「用过即失效」。
+    才知道完整地址。令牌**只因被使用而过期**，不设时间上限。
 
     ``base_url`` 是对外地址（如 ``https://lei.example.com``）。它有两个作用：
     拼出推送里那个链接，以及把它的主机名放进 Host 白名单 —— 否则从公网访问
@@ -389,7 +443,7 @@ def create_server(
         if parsed.hostname:
             allowed_hosts.add(parsed.hostname.lower())
 
-    state = _State(auth_token, ttl)
+    state = _State(auth_token)
 
     handler = type(
         "Handler",
@@ -404,6 +458,7 @@ def create_server(
             if on_login_success is not None
             else None,
             "cache": cache,
+            "env_file": env_file,
         },
     )
     httpd = ThreadingHTTPServer((host, port), handler)
@@ -446,27 +501,25 @@ def serve(
     port: int = DEFAULT_PORT,
     log=print,
     *,
-    ttl: float = 0.0,
     base_url: str = "",
     on_login_success: Any = None,
     cache: Any = None,
+    env_file: Any = None,
 ) -> int:
     """启动短信登录网页；按 Ctrl+C 退出。"""
     httpd = create_server(
         host,
         port,
         log,
-        ttl=ttl,
         base_url=base_url,
         on_login_success=on_login_success,
         cache=cache,
+        env_file=env_file,
     )
 
     log(f"🌐短信登录页面：{login_url(httpd, base_url)}")
     log("   地址里的随机串是本次启动生成的：别发给别人、也别截图外传")
     log("   只有这一个地址能打开页面，其它路径一律 404；登录用过一次就失效")
-    if ttl > 0:
-        log(f"   未使用的话 {int(ttl)} 秒后也会失效")
     if host not in ("127.0.0.1", "localhost"):
         log(f"⚠️服务绑在 {host} 上，能从外部访问：")
         log("   地址本身就是凭据，拿到它的人能用你的账号登录")
@@ -545,9 +598,11 @@ PAGE = r"""<!doctype html>
 <main class="card">
   <h1>雷神加速器 · 短信登录</h1>
 
-  <label for="phone">账户</label>
+  <label for="phone">手机号</label>
   <div class="row">
-    <select id="phone"></select>
+    <input id="phone" list="phone-options" inputmode="numeric" autocomplete="tel"
+           placeholder="13800138000">
+    <datalist id="phone-options"></datalist>
     <button id="send" type="button">发送验证码</button>
   </div>
 
@@ -560,8 +615,9 @@ PAGE = r"""<!doctype html>
   <p id="msg"></p>
 
   <p class="hint">
-    登录成功后令牌会写进本地缓存，定时任务下一次运行就会直接复用它。
-    每天凌晨自动暂停时不会再尝试密码登录。
+    已配置的号码会出现在输入框的下拉提示里，也可以直接输一个新号码 ——
+    登录成功后它会自动存进配置。<br>
+    登录成功后令牌写进本地缓存，定时任务下一次运行就会直接复用它。
   </p>
 </main>
 
@@ -569,7 +625,8 @@ PAGE = r"""<!doctype html>
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  var phoneEl = $("phone"), codeEl = $("code"), sendBtn = $("send"),
+  var phoneEl = $("phone"), optionsEl = $("phone-options"),
+      codeEl = $("code"), sendBtn = $("send"),
       loginBtn = $("login"), msgEl = $("msg");
   var cooldownTimer = null;
 
@@ -614,8 +671,8 @@ PAGE = r"""<!doctype html>
   }
 
   sendBtn.addEventListener("click", function () {
-    var phone = phoneEl.value;
-    if (!phone) { say("请先选择账户", "err"); return; }
+    var phone = phoneEl.value.trim();
+    if (!/^\d{6,20}$/.test(phone)) { say("请填写正确的手机号（6-20 位数字）", "err"); return; }
     say("正在发送…");
     sendBtn.disabled = true;
     post("/api/sms/send", { phone: phone }).then(function (res) {
@@ -634,8 +691,8 @@ PAGE = r"""<!doctype html>
   });
 
   loginBtn.addEventListener("click", function () {
-    var phone = phoneEl.value, smscode = codeEl.value.trim();
-    if (!phone) { say("请先选择账户", "err"); return; }
+    var phone = phoneEl.value.trim(), smscode = codeEl.value.trim();
+    if (!phone) { say("请先填写手机号", "err"); return; }
     if (!smscode) { say("请填写收到的验证码", "err"); codeEl.focus(); return; }
     say("正在登录…");
     loginBtn.disabled = true;
@@ -652,28 +709,18 @@ PAGE = r"""<!doctype html>
   });
 
   fetch(BASE + "api/state").then(function (r) { return r.json(); }).then(function (res) {
-    if (res.config_error) {
-      phoneEl.innerHTML = '<option value="">（配置有问题）</option>';
-      say("配置读不出来：" + res.config_error, "err");
-      sendBtn.disabled = true;
-      loginBtn.disabled = true;
-      return;
-    }
+    // 没配账户不是错误：下拉里没提示，直接输号码就行
     var list = res.accounts || [];
-    if (!list.length) {
-      phoneEl.innerHTML = '<option value="">（没有配置任何账户）</option>';
-      say("先在 .env 里配置 PHONE_1 / PASSWORD_1，再刷新本页", "err");
-      sendBtn.disabled = true;
-      loginBtn.disabled = true;
-      return;
-    }
-    phoneEl.innerHTML = list.map(function (a) {
+    optionsEl.innerHTML = list.map(function (a) {
       return '<option value="' + a.phone + '">' + a.label + "</option>";
     }).join("");
+    if (!list.length) {
+      say(res.config_error || "还没有配置账户，直接输入手机号即可", "");
+    }
     var left = res.cooldown_left;
     if (left) { startCooldown(left); }
   }).catch(function () {
-    say("读不到账户列表，确认本地服务还在运行", "err");
+    say("读不到账户列表，确认服务还在运行", "err");
   });
 })();
 </script>

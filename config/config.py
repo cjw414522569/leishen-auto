@@ -32,8 +32,6 @@ DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 DEFAULT_FAIL_RETRY_INTERVAL = 3600.0
 DEFAULT_FAIL_NOTIFY_EVERY = 5
 
-# 一次性短信登录地址的有效期（秒）。用过即失效，这个只是兜底的上限
-DEFAULT_LOGIN_LINK_TTL = 1800.0
 DEFAULT_WEB_PORT = 8765
 
 # 找到这些标记就认为到项目根了，不再往上找 .env
@@ -41,14 +39,6 @@ PROJECT_MARKERS = (".git", "pyproject.toml", "setup.py")
 
 # 凭据类配置项的前缀：这些键不做逐键合并，见 merge_config_sources
 CREDENTIAL_PREFIXES = ("PHONE", "PASSWORD")
-
-# 凭据不完整时的提示：把「不跨来源混合」的规则一并说清楚，
-# 否则用户会以为 .env 里的密码本该补上来
-_INCOMPLETE_HINT = (
-    "需要同时配置 {group}。注意凭据不跨来源混合——"
-    "这两项要么都在 .env 里，要么都在环境变量里"
-)
-
 
 class ConfigError(Exception):
     """配置加载失败。"""
@@ -163,11 +153,10 @@ class Config:
     # 整轮失败后的重试策略（仅本地/Docker 的常驻模式用）
     fail_retry_interval: float = DEFAULT_FAIL_RETRY_INTERVAL  # 秒；0 = 不重试
     fail_notify_every: int = DEFAULT_FAIL_NOTIFY_EVERY
-    # 短信登录网页（仅本地/Docker）：对外地址、监听地址、一次性地址的有效期
+    # 短信登录网页（仅本地/Docker）：对外地址与监听地址
     web_base_url: str = ""  # 推送里用的对外地址，如 https://leishen.example.com
     web_host: str = ""  # 监听地址；服务器上要 0.0.0.0
     web_port: int = 8765
-    login_link_ttl: float = DEFAULT_LOGIN_LINK_TTL  # 秒
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -332,7 +321,6 @@ class WebSettings:
     base_url: str = ""  # 对外地址；空表示「不推送登录链接」模式
     host: str = ""
     port: int = DEFAULT_WEB_PORT
-    link_ttl: float = DEFAULT_LOGIN_LINK_TTL  # 秒
 
     @property
     def public(self) -> bool:
@@ -363,12 +351,7 @@ def _web_settings(source: Mapping[str, str]) -> WebSettings:
     if base_url and not base_url.startswith(("http://", "https://")):
         raise ConfigError("WEB_BASE_URL 要以 http:// 或 https:// 开头")
 
-    return WebSettings(
-        base_url=base_url,
-        host=host,
-        port=port,
-        link_ttl=parse_duration(_get(source, "LOGIN_LINK_TTL")) or DEFAULT_LOGIN_LINK_TTL,
-    )
+    return WebSettings(base_url=base_url, host=host, port=port)
 
 
 def load_web_settings(
@@ -377,6 +360,73 @@ def load_web_settings(
 ) -> WebSettings:
     """只读短信登录网页的配置。"""
     return _web_settings(_resolve_source(env_file, environ))
+
+
+PHONE_RE = re.compile(r"^\d{6,20}$")
+
+
+def env_file_path(env_file: str | PathLike[str] | None = None) -> Path:
+    """.env 的位置：找到的用找到的，没有就用项目根目录下的。
+
+    存手机号时需要能落到一个具体文件上 —— 用 ``find_env_file`` 的话，没配过
+    ``.env`` 的项目会返回 None，那就没地方写了。
+    """
+    if env_file is not None:
+        return Path(env_file)
+    found = find_env_file()
+    return found if found is not None else Path(__file__).resolve().parent.parent / ENV_FILE_NAME
+
+
+def add_account_phone(
+    phone: str, env_file: str | PathLike[str] | None = None
+) -> tuple[Path, str, bool]:
+    """把一个手机号写进 ``.env``，返回 ``(文件路径, 键名, 是否新加)``。
+
+    网页上直接输号码登录成功后调它 —— 这样下次打开页面就能从列表里选，
+    不用再手输。
+
+    只写 ``PHONE_n`` 一项，不碰密码（密码登录已封停，不需要）。若该号码已在
+    配置里，原样返回，不重复添加。
+    """
+    number = str(phone or "").strip()
+    if not PHONE_RE.match(number):
+        # 挡掉注入：号码只能是纯数字，不可能带 "=" 或换行去伪造别的配置项
+        raise ConfigError(f"手机号格式不正确：{phone!r}")
+
+    path = env_file_path(env_file)
+    values = parse_env_file(path)
+
+    existing = _get(values, "PHONE")
+    if existing == number:
+        return path, "PHONE", False
+    for key, value in values.items():
+        if INDEXED_PHONE_RE.match(str(key)) and value == number:
+            return path, str(key), False
+
+    indexes = [
+        int(match.group(1))
+        for key in values
+        if (match := INDEXED_PHONE_RE.match(str(key)))
+    ]
+    key = f"PHONE_{max(indexes) + 1 if indexes else 1}"
+
+    # 追加而不是重写：保留用户原有的注释和排版
+    try:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError as exc:
+        raise ConfigError(f"读不了 {path}：{exc}") from exc
+
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += f"{key}={number}\n"
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"写不了 {path}：{exc}") from exc
+
+    return path, key, True
 
 
 def load_cache_file(
@@ -461,8 +511,6 @@ def collect_accounts(
     phone = _get(source, "PHONE")
     if phone:
         password_md5 = _resolve_password_md5(source, "")
-        if not password_md5:
-            raise ConfigError(_INCOMPLETE_HINT.format(group="PHONE 与 PASSWORD"))
         token = _get(source, "PUSHPLUS_TOKEN") or default_pushplus_token
         accounts.append(Account(phone, password_md5, 0, token))
 
@@ -494,9 +542,12 @@ def collect_accounts(
         password_md5 = _resolve_password_md5(source, suffix)
         if not phone and not password_md5:
             continue  # 整组留空，视为占位符
-        if not phone or not password_md5:
-            hint = _INCOMPLETE_HINT.format(group=f"PHONE{suffix} 与 PASSWORD{suffix}")
-            raise ConfigError(f"账户 {index} 配置不完整：{hint}")
+        if not phone:
+            # 只配了密码没有手机号 —— 账户的标识是手机号，这组没法用
+            raise ConfigError(
+                f"账户 {index} 只配了 PASSWORD{suffix}，缺少 PHONE{suffix}；"
+                "请补全，或把这一项删掉"
+            )
         token = _get(source, f"PUSHPLUS_TOKEN{suffix}") or default_pushplus_token
         accounts.append(Account(phone, password_md5, index, token))
 
@@ -522,8 +573,8 @@ def load_config(
     accounts = collect_accounts(source, default_pushplus_token=_get(source, "PUSHPLUS_TOKEN"))
     if not accounts:
         raise ConfigError(
-            "没有配置任何账户：需要配置 PHONE + PASSWORD，"
-            "多账户时使用 PHONE_1/PASSWORD_1、PHONE_2/PASSWORD_2…"
+            "没有配置任何账户：至少配置一个 PHONE（单账户）或 "
+            "PHONE_1、PHONE_2…（多账户）"
         )
 
     fail_retry = _fail_retry(source)

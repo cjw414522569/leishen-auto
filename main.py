@@ -217,12 +217,12 @@ class LoginGate:
             self.log("⏳登录地址已推送、还没被使用，这次不重复推送")
             return False
 
-        self.httpd.state.rotate(self.settings.link_ttl)
+        self.httpd.state.rotate()
         url = login_url(self.httpd, self.settings.base_url)
 
         cfg = self._config()
         accounts = list(cfg.accounts) if cfg else []
-        message = build_login_link_message(url, accounts, self.settings.link_ttl)
+        message = build_login_link_message(url, accounts)
 
         # 推给谁：全局 token 加各账户自己的 token（去重）
         targets: list[str] = []
@@ -395,7 +395,6 @@ def main(argv: list[str] | None = None) -> int:
         return serve(
             args.host or (web.bind if web else "127.0.0.1"),
             args.port or (web.port if web else 8765),
-            ttl=web.link_ttl if web else 0.0,
             base_url=web.base_url if web else "",
             cache=cache,
         )

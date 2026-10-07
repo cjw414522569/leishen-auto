@@ -223,7 +223,6 @@ def account_content(account: Any, now: datetime | None = None) -> str:
 def build_login_link_message(
     url: str,
     accounts: list[Any] | None = None,
-    ttl_seconds: float = 0.0,
     now: datetime | None = None,
 ) -> Message:
     """令牌失效时那条「点这里重新登录」的推送。
@@ -239,13 +238,13 @@ def build_login_link_message(
         lines.append("")
         lines.append("涉及的账户：" + "、".join(labels))
 
-    lines += ["", "点开下面的地址，输入手机收到的验证码即可：", url]
-
-    if ttl_seconds > 0:
-        minutes = max(1, int(ttl_seconds // 60))
-        lines.append("")
-        lines.append(f"⏳这个地址只用一次，{minutes} 分钟内有效 —— 用过就作废。")
-
+    lines += [
+        "",
+        "点开下面的地址，输入手机收到的验证码即可：",
+        url,
+        "",
+        "⏳这个地址**只用一次** —— 登录成功后立即作废，没有时间限制。",
+    ]
     lines += ["", "（本消息由自动任务发送，无需回复）"]
     return Message(token="", title="雷神加速器：需要重新登录", content="\n".join(lines))
 
